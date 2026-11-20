@@ -1,0 +1,30 @@
+# Builds the Windows installer when a version tag (v1.2.3) is pushed.
+# Code signing: set WIN_CSC_LINK (base64 .pfx) and WIN_CSC_KEY_PASSWORD secrets once the certificate is
+# bought; without them the installer is built unsigned (Windows SmartScreen will warn users).
+name: Release desktop
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    defaults: {run: {working-directory: desktop}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 24, cache: npm, cache-dependency-path: desktop/package-lock.json}
+      - run: npm ci
+      - run: npm run typecheck && npm test
+      - run: npm run dist
+        env:
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ordexa-windows-installer
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/latest.yml

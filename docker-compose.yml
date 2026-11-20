@@ -1,0 +1,76 @@
+# Local development stack. Each backend process is its own container, so one crashing never stops the others.
+#   docker compose up -d db            -> just PostgreSQL (run the API from your venv)
+#   docker compose up -d --build       -> everything
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ordexa
+      POSTGRES_PASSWORD: ordexa
+      POSTGRES_DB: ordexa
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ordexa"]
+      interval: 3s
+      retries: 20
+
+  migrate:
+    build: ./backend
+    command: ["ordexa", "migrate"]
+    environment: &env
+      ORDEXA_DATABASE_URL: postgresql+psycopg://ordexa:ordexa@db:5432/ordexa
+      ORDEXA_JWT_SECRET: ${ORDEXA_JWT_SECRET:-dev-only-change-me-dev-only-change-me}
+      ORDEXA_WHATSAPP_VERIFY_TOKEN: ${ORDEXA_WHATSAPP_VERIFY_TOKEN:-}
+      ORDEXA_WHATSAPP_APP_SECRET: ${ORDEXA_WHATSAPP_APP_SECRET:-}
+      ORDEXA_WHATSAPP_TOKEN: ${ORDEXA_WHATSAPP_TOKEN:-}
+      ORDEXA_WHATSAPP_PHONE_NUMBER_ID: ${ORDEXA_WHATSAPP_PHONE_NUMBER_ID:-}
+      ORDEXA_AI_PROVIDER: ${ORDEXA_AI_PROVIDER:-auto}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    depends_on:
+      db: {condition: service_healthy}
+
+  api:
+    build: ./backend
+    command: ["uvicorn", "ordexa.apps.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *env
+    ports: ["8000:8000"]
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  webhook:
+    build: ./backend
+    command: ["uvicorn", "ordexa.apps.webhook:app", "--host", "0.0.0.0", "--port", "8001"]
+    environment: *env
+    ports: ["8001:8001"]
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  worker-ai:
+    build: ./backend
+    command: ["python", "-m", "ordexa.apps.worker", "--queue", "ai"]
+    environment: *env
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  worker-channels:
+    build: ./backend
+    command: ["python", "-m", "ordexa.apps.worker", "--queue", "channels"]
+    environment: *env
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  worker-outbox:
+    build: ./backend
+    command: ["python", "-m", "ordexa.apps.worker", "--queue", "outbox"]
+    environment: *env
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+volumes:
+  pgdata:

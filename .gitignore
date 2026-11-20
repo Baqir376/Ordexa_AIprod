@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node / Electron
+node_modules/
+desktop/out/
+desktop/dist/
+
+# Local
+.env
+.e2e_code
+*.db
+*.db-wal
+*.db-shm
