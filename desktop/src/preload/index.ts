@@ -33,6 +33,7 @@ const api = {
   backupInfo: () => call('backup.info'),
   openBackups: () => call('backup.open'),
   request: (method: string, path: string, body?: unknown) => call('api.request', method, path, body),
+  dataUrl: (path: string) => call('api.dataUrl', path),
   onState: (fn: (s: AppState) => void) => {
     const listener = (_: unknown, s: AppState) => fn(s)
     ipcRenderer.on('ordexa:state', listener)

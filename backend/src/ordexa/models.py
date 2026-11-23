@@ -1,6 +1,6 @@
 """Import every module's models so ``Base.metadata`` is complete (Alembic, tests)."""
 
-from ordexa.modules.ai.models import AiOrderRequest, ProductAlias  # noqa: F401
+from ordexa.modules.ai.models import AiAttachment, AiOrderRequest, ProductAlias  # noqa: F401
 from ordexa.modules.audit.models import AuditEvent  # noqa: F401
 from ordexa.modules.catalogue.models import Batch, Product  # noqa: F401
 from ordexa.modules.channels.models import WhatsappContact, WhatsappMessage, WhatsappNumber  # noqa: F401

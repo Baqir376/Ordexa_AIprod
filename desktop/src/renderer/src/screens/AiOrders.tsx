@@ -31,6 +31,8 @@ interface Order {
   status: string
   customer: { id: string; code: string; name: string } | null
   raw_text: string
+  kind?: 'text' | 'image' | 'audio'
+  has_attachment?: boolean
   received_at: string
   line_count: number
   warnings: { code: string; message: string }[]
@@ -92,7 +94,7 @@ export function AiOrders({ state }: { state: AppState }) {
               <b>{o.customer?.name ?? o.sender ?? 'Unknown sender'}</b>
               <span className={`tag st-${o.status}`}>{STATUS_LABEL[o.status] ?? o.status}</span>
             </div>
-            <div className="oc-text">{o.raw_text}</div>
+            <div className="oc-text">{o.kind === 'image' ? '[Photo] ' : o.kind === 'audio' ? '[Voice note] ' : ''}{o.raw_text.startsWith('[') ? '' : o.raw_text}</div>
             <div className="muted small">{o.number} · {o.source === 'whatsapp' ? 'WhatsApp' : 'Typed'} · {new Date(o.received_at).toLocaleTimeString('en-PK')}</div>
           </button>
         ))}
@@ -149,7 +151,8 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
       </div>
       <div className="message-bubble">
         <div className="muted small">{order.source === 'whatsapp' ? `WhatsApp ${order.sender ?? ''}` : 'Typed by staff'} · {new Date(order.received_at).toLocaleString('en-PK')}</div>
-        {order.raw_text}
+        {order.raw_text.startsWith('[') && order.kind !== 'text' ? null : order.raw_text}
+        {order.has_attachment && <Attachment orderId={order.id} kind={order.kind ?? 'text'} />}
       </div>
       {order.warnings.map((w) => <div key={w.code} className={`alert ${w.code === 'contains_instructions' ? 'error' : 'warn'}`}>{w.message}</div>)}
       {order.status === 'received' || order.status === 'processing' ? (
@@ -307,5 +310,28 @@ function NewOrderModal({ onClose, onCreated }: { onClose: () => void; onCreated:
         </div>
       </div>
     </Modal>
+  )
+}
+
+/** The shop's original photo (zoomable) or voice note (playable). */
+function Attachment({ orderId, kind }: { orderId: string; kind: string }) {
+  const [url, setUrl] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [zoom, setZoom] = useState(false)
+  useEffect(() => {
+    ordexa().dataUrl(`/api/v1/ai/orders/${orderId}/attachment`).then(setUrl, (e: Error) => setError(e.message))
+  }, [orderId])
+  if (error) return <div className="bad-text small">{error}</div>
+  if (!url) return <div className="muted small">Loading {kind === 'audio' ? 'voice note' : 'photo'}…</div>
+  if (kind === 'audio') return <audio className="attachment-audio" controls src={url} />
+  return (
+    <>
+      <img className="attachment-img" src={url} alt="Order photo sent by the shop" onClick={() => setZoom(true)} title="Click to enlarge" />
+      {zoom && (
+        <div className="modal-backdrop" onMouseDown={() => setZoom(false)}>
+          <img className="attachment-zoom" src={url} alt="Order photo, enlarged" />
+        </div>
+      )}
+    </>
   )
 }

@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,7 +24,9 @@ class AiOrderRequest(Base):
     source_message_id: Mapped[str] = mapped_column(String(120))  # wamid or client id (dedup)
     sender: Mapped[str | None] = mapped_column(String(40))  # verified phone (E.164)
     customer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("customers.id"), index=True)
-    raw_text: Mapped[str] = mapped_column(Text)  # preserved exactly as received (AI-001)
+    raw_text: Mapped[str] = mapped_column(Text)  # preserved exactly as received (AI-001); caption for media
+    kind: Mapped[str] = mapped_column(String(10), default="text", server_default="text")  # text | image | audio
+    attachment_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("ai_attachments.id"))
     # received | processing | needs_review | draft_ready | approved | rejected | failed
     status: Mapped[str] = mapped_column(String(20), default="received", index=True)
     extractor: Mapped[str | None] = mapped_column(String(60))  # e.g. "anthropic:claude-opus-5-5" | "rules:v1"
@@ -40,6 +42,21 @@ class AiOrderRequest(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AiAttachment(Base):
+    """Photo of an order list or a voice note, kept with the order so staff can see/hear the original."""
+
+    __tablename__ = "ai_attachments"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=new_id)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
+    media_type: Mapped[str] = mapped_column(String(100))  # image/jpeg, audio/ogg ...
+    size: Mapped[int] = mapped_column(Integer)
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    source_media_id: Mapped[str | None] = mapped_column(String(120))  # WhatsApp media id
+    transcript: Mapped[str | None] = mapped_column(Text)  # speech-to-text, when a provider is configured
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ProductAlias(Base):

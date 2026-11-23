@@ -141,6 +141,7 @@ app.whenReady().then(() => {
   })
   handle('receipts.list', () => (requireUser(), client.billing.listReceipts(200)))
   handle('api.request', (method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown) => client.request(method, path, body))
+  handle('api.dataUrl', (path: string) => client.requestDataUrl(path))
   handle('printers.list', async () => (win ? (await win.webContents.getPrintersAsync()).map((p) => p.name) : []))
   handle('printer.get', () => ({ name: client.store.getMeta('printer_name'), auto: client.store.getMeta('auto_print') === '1' }))
   handle('printer.set', (name: string | null, auto: boolean) => {

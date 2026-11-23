@@ -151,7 +151,7 @@ def test_claude_failure_falls_back_to_rules(make_biz, inline_ai, monkeypatch):
     monkeypatch.setenv("ORDEXA_AI_PROVIDER", "anthropic")
     get_settings.cache_clear()
 
-    def boom(self, text):
+    def boom(self, text, image=None):
         raise RuntimeError("provider unavailable")
 
     monkeypatch.setattr(extract.ClaudeExtractor, "__init__", lambda self, model: setattr(self, "name", f"anthropic:{model}"))

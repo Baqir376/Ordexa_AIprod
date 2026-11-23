@@ -125,6 +125,21 @@ function Simulator() {
     const r = await run(() => ordexa().request('POST', '/api/v1/channels/whatsapp/simulate', { phone, text }))
     if (r) { setText(''); await load() }
   }
+  /** Simulate the shop sending a photo of its order list or a voice note (caption = typed text). */
+  async function sendFile(file: File | undefined) {
+    if (!file) return
+    const kind = file.type.startsWith('audio/') ? 'audio' : file.type.startsWith('image/') ? 'image' : null
+    if (!kind) return
+    if (file.size > 10 * 1024 * 1024) return alert('File must be under 10 MB.')
+    const b64 = await new Promise<string>((resolve, reject) => {
+      const fr = new FileReader()
+      fr.onload = () => resolve(String(fr.result).split(',')[1] ?? '')
+      fr.onerror = () => reject(fr.error)
+      fr.readAsDataURL(file)
+    })
+    const r = await run(() => ordexa().request('POST', '/api/v1/channels/whatsapp/simulate', { phone, text, media_kind: kind, media_base64: b64, media_type: file.type }))
+    if (r) { setText(''); await load() }
+  }
   return (
     <div className="sim card pad">
       <p className="muted small">Pretend to be a shop messaging your WhatsApp number. Uses the real sign-up bot and AI order reading; replies are recorded instead of sent.</p>
@@ -139,6 +154,10 @@ function Simulator() {
       <div className="inline-form">
         <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && text && void send()} placeholder="Type as the shop… e.g. hi, 1, 101, 10 box panadol" />
         <button className="btn primary" disabled={busy || !text} onClick={() => void send()}>Send</button>
+        <label className="btn file-btn" title="Send a photo of an order list or a voice note">
+          Photo / voice
+          <input type="file" accept="image/*,audio/*" disabled={busy} onChange={(e) => { void sendFile(e.target.files?.[0]); e.target.value = '' }} />
+        </label>
       </div>
       <ErrorBox error={error} />
     </div>

@@ -93,7 +93,7 @@ def test_ai_job_failure_is_visible_and_recoverable(make_biz, monkeypatch):
         "/api/v1/ai/orders", json={"id": str(uuid.uuid4()), "customer_id": customer["id"], "text": "3 botal calpol"}
     ).json()
     real = ai.extract_order
-    monkeypatch.setattr(ai, "extract_order", lambda text: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(ai, "extract_order", lambda text, image=None: (_ for _ in ()).throw(RuntimeError("boom")))
     with get_sessionmaker()() as s:
         run_one(s, "ai", HANDLERS["ai"])
     failed = biz.get(f"/api/v1/ai/orders/{o['id']}").json()

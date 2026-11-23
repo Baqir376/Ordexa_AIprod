@@ -47,3 +47,19 @@ verified ─► every message becomes an AI order request; "balance" replies wit
 6. Register the number for the business: `POST /api/v1/channels/whatsapp/numbers`.
 
 Until then, **Settings → WhatsApp sign-ups → Test chat** runs the same bot and AI end to end.
+
+## Addendum: answers, photos and voice notes (2026-11-23)
+- **Answers to questions.**
+  - The bot asks one question at a time.
+  - A short reply ("2", "extra wali", "12") from a shop with an open order is applied to that order instead of
+    starting a new one, within 24 hours. A reply that names a product with a quantity is still treated as a new order.
+  - A shop's choice is marked `resolution: customer`. It is **not** saved as approved memory; only staff approve
+    aliases.
+- **Photo of an order list.**
+  - The worker downloads the image through the Cloud API and stores it with the order (`ai_attachments`).
+  - Claude reads the photo with the same JSON schema as text.
+  - Without a Claude key, the photo waits on the order screen for staff to add the items.
+- **Voice note.** Stored with the order and playable on the order screen; staff listen and add the items.
+  `AiAttachment.transcript` is ready for a speech-to-text provider (Google Speech-to-Text or Whisper; Claude does not
+  take audio input). Once a provider is configured, the transcript goes through the same pipeline as text.
+- The simulator accepts photos and voice files, so all of this can be tested without Meta.

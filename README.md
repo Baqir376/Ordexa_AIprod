@@ -16,7 +16,7 @@ A white-label ERP for Pakistani medicine distributors and chemists:
 | Area | Features |
 |---|---|
 | Counter (works offline) | Keyboard-first billing (F2/F4/F9). Earliest-expiry batches first; expired batches never offered. Bonus quantities. Credit and stock warnings. Per-PC bill series. Cash receipts. Silent receipt printing / auto-print. Reprint. |
-| WhatsApp + AI | Sign-up bot (shop code + one-time code, or staff approval). AI order reading (LLM, with a rule parser fallback). One-click fixes. Per-shop product memory, versioned. Approve → W-series bill. Replies to the shop. Balance query. Simulator. |
+| WhatsApp + AI | Sign-up bot (shop code + one-time code, or staff approval). Shops answer the bot's questions in the chat. Photo orders (read by Claude) and voice notes (played for staff). AI order reading (LLM, with a rule parser fallback). One-click fixes. Per-shop product memory, versioned. Approve → W-series bill. Replies to the shop. Balance query. Simulator. |
 | Stock & purchasing | Products, batches, expiry, reorder levels. Purchases with batch, expiry, cost and new sale price. Stock adjustments with reasons. Warehouse transfers. Movement history. |
 | Money | Customer and supplier ledgers. Receipts and payments (cash, bank, cheque). Cheque clearing and bounce. Sales returns (credit notes, restock or not). Expenses. Receivable and payable ageing. |
 | Reports | Dashboard. Sales by day, product and customer. Profit. Stock valuation. Expiry. Reorder suggestions. Flagged bills. CSV export. |
@@ -61,7 +61,7 @@ Notes:
 
 ## Tests
 ```bash
-cd backend && .venv/Scripts/pytest            # 57 tests on real PostgreSQL
+cd backend && .venv/Scripts/pytest            # 67 tests on real PostgreSQL
 cd desktop && npm test                        # offline billing engine
 ORDEXA_E2E_URL=http://127.0.0.1:8000 ORDEXA_E2E_TENANT=<code> ORDEXA_E2E_PASSWORD=<pw> npm run test:e2e
 npm run build && node tests/smoke/full-tour.mjs <code> <pw> <screenshot-dir>   # drives the real app
@@ -69,7 +69,7 @@ npm run build && node tests/smoke/full-tour.mjs <code> <pw> <screenshot-dir>   #
 
 | Suite | What it covers |
 |---|---|
-| Backend (57 tests) | Permissions, tenant isolation, sync idempotency, purchases, ledger/cheques/returns, reports, AI resolution/memory/approval, WhatsApp sign-up and lockout, webhook → worker. |
+| Backend (67 tests) | Permissions, tenant isolation, sync idempotency, purchases, ledger/cheques/returns, reports, AI resolution/memory/approval, WhatsApp sign-up and lockout, webhook → worker. |
 | Two-PC end-to-end test | Two PCs bill and take receipts offline, reconnect, replay; no duplicates and exact stock. |
 | UI tour | Bills a shop, signs a shop up over WhatsApp, orders in Roman Urdu, fixes and approves the AI draft into a bill, then opens every back-office screen. |
 

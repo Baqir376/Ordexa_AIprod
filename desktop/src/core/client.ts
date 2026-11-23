@@ -183,6 +183,26 @@ export class OrdexaClient {
     }
   }
 
+  /** Download a binary file (order photo / voice note) from the API as a data: URL for <img> or <audio>. */
+  async requestDataUrl(path: string): Promise<string> {
+    if (!this.user) throw new Error('Please sign in.')
+    if (!/^\/api\/v1\/[\w\-/]*$/.test(path)) throw new Error('invalid path')
+    if (!this.token) throw new Error('This needs the server. Connect to the internet and sign in again.')
+    const opts = this.apiOptions()
+    let res: Response
+    try {
+      res = await fetch(`${opts.baseUrl.replace(/\/+$/, '')}${path}`, {
+        headers: { Authorization: `Bearer ${this.token}` },
+        signal: AbortSignal.timeout(60_000),
+      })
+    } catch {
+      throw new Error('Cannot reach the server.')
+    }
+    if (!res.ok) throw new Error(`Could not load the file (HTTP ${res.status}).`)
+    const type = (res.headers.get('content-type') ?? 'application/octet-stream').split(';')[0]
+    return `data:${type};base64,${Buffer.from(await res.arrayBuffer()).toString('base64')}`
+  }
+
   /** Push + pull. Safe to call often; concurrent calls share one run. Never throws. */
   syncNow(): Promise<SyncSummary | null> {
     if (this.syncing) return this.syncing

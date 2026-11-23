@@ -7,10 +7,11 @@ against the catalogue and approved memory, checks units, stock, price and credit
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from difflib import SequenceMatcher
 
@@ -18,8 +19,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ordexa.config import get_settings
-from ordexa.modules.ai.extract import ExtractedLine, Extraction, extract_order, normalise_phrase
-from ordexa.modules.ai.models import AiOrderRequest, ProductAlias
+from ordexa.modules.ai.extract import (
+    ExtractedLine,
+    Extraction,
+    ExtractResult,
+    RuleExtractor,
+    extract_order,
+    normalise_phrase,
+)
+from ordexa.modules.ai.models import AiAttachment, AiOrderRequest, ProductAlias
 from ordexa.modules.audit.models import record
 from ordexa.modules.catalogue.models import Batch, Product
 from ordexa.modules.customers.models import Customer
@@ -212,7 +220,7 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
             line.update(product_id=str(product.id), product_name=product.name, sale_unit=product.sale_unit)
             if not product.is_active:
                 line["issues"].append("inactive_product")
-            if line["unit"] and line["unit"] != product.sale_unit and line.get("resolution") != "operator":
+            if line["unit"] and line["unit"] != product.sale_unit and line.get("resolution") not in ("operator", "customer"):
                 # Never convert units from text (SRS 7.5): a person confirms the quantity in the selling unit.
                 line["issues"].append("unit_mismatch")
             price = _price(session, req.tenant_id, wh.id, product)
@@ -238,7 +246,16 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
         lines.append(line)
 
     warnings: list[dict] = []
-    if not lines:
+    if not lines and req.kind == "audio":
+        warnings.append({"code": "voice_note", "message": "Voice note: play it and add the items with '+ Add item'."})
+    elif not lines and req.kind == "image":
+        how = (
+            "set ANTHROPIC_API_KEY to read photos automatically"
+            if not (req.extractor or "").startswith("anthropic")
+            else "the photo could not be read"
+        )
+        warnings.append({"code": "photo_unread", "message": f"Photo order: look at the picture and add the items ({how})."})
+    elif not lines:
         warnings.append({"code": "no_lines", "message": "No order lines could be read from this message."})
     if req.customer_id is None:
         warnings.append({"code": "unknown_customer", "message": "Sender is not linked to a customer."})
@@ -297,7 +314,16 @@ def process_request(session: Session, request_id: uuid.UUID) -> AiOrderRequest:
     if req.status not in ("received", "processing", "failed"):
         return req  # already processed (job retried after success)
     req.status = "processing"
-    result = extract_order(req.raw_text)
+    image = None
+    text = req.raw_text
+    if req.attachment_id:
+        att = session.get(AiAttachment, req.attachment_id)
+        if req.kind == "image":
+            image = (att.data, att.media_type)
+            text = "" if req.raw_text.startswith("[") else req.raw_text
+        elif req.kind == "audio":
+            text = att.transcript or ""  # speech-to-text when a provider is configured; else staff listen
+    result = extract_order(text, image) if (text or image) else ExtractResult(Extraction(), "none", [])
     req.extractor = result.extractor
     req.extraction = result.extraction.model_dump()
     req.trace = result.trace
@@ -316,25 +342,142 @@ def process_request(session: Session, request_id: uuid.UUID) -> AiOrderRequest:
     return req
 
 
+def first_question(req: AiOrderRequest) -> str | None:
+    return req.questions[0] if req.questions else None
+
+
 def _notify_customer(session: Session, req: AiOrderRequest) -> None:
-    """Queue a WhatsApp reply (sent by the outbox worker)."""
+    """Queue a WhatsApp reply (sent by the outbox worker). Questions go one at a time so a reply like "2" is
+    unambiguous; the shop's answer is applied by ``apply_customer_answer``."""
     if not req.sender:
         return
-    if req.status == "needs_review" and req.questions:
-        body = "Shukriya! Aap ka order mil gaya. Kuch cheezein confirm karni hain:\n- " + "\n- ".join(req.questions[:5])
+    q = first_question(req)
+    if req.status == "needs_review" and q:
+        more = f" ({len(req.questions) - 1} aur sawal baqi)" if len(req.questions) > 1 else ""
+        body = f"Shukriya! Order {req.number} mil gaya. Aik cheez confirm karein{more}:\n{q}"
+    elif req.kind in ("image", "audio") and not req.lines:
+        what = "photo" if req.kind == "image" else "voice message"
+        body = f"Shukriya! Aap ka {what} mil gaya (order {req.number}). Hamari team check karke confirm karegi."
     else:
         body = (
             f"Shukriya! Order {req.number} mil gaya ({len(req.lines)} items). Hamari team confirm karke bill "
             f"bhej degi. / Order received, we will confirm shortly."
         )
+    key = hashlib.sha256(body.encode()).hexdigest()[:16]
     enqueue(
         session,
         kind="whatsapp.send",
         queue="outbox",
         tenant_id=req.tenant_id,
-        idempotency_key=f"wa-reply:{req.id}:{req.status}:{len(req.questions)}",
+        idempotency_key=f"wa-reply:{req.id}:{key}",
         payload={"to": req.sender, "body": body, "ref": req.number},
     )
+
+
+# ------------------------------------------------------------------ the shop answers a question on WhatsApp
+
+ANSWER_WINDOW = timedelta(hours=24)
+
+
+def open_clarification(session: Session, tenant_id: uuid.UUID, sender: str) -> AiOrderRequest | None:
+    """The shop's latest WhatsApp order that is still waiting for an answer from them."""
+    return session.scalar(
+        select(AiOrderRequest)
+        .where(
+            AiOrderRequest.tenant_id == tenant_id,
+            AiOrderRequest.source == "whatsapp",
+            AiOrderRequest.sender == sender,
+            AiOrderRequest.status == "needs_review",
+            AiOrderRequest.received_at >= utcnow() - ANSWER_WINDOW,
+        )
+        .order_by(AiOrderRequest.received_at.desc())
+        .limit(1)
+    )
+
+
+def _number(text: str) -> float | None:
+    from ordexa.modules.ai.extract import NUMBER_WORDS, URDU_DIGITS
+
+    t = text.translate(URDU_DIGITS).strip().lower().rstrip(".")
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*[a-z]*", t)
+    if m:
+        return float(m.group(1))
+    return float(NUMBER_WORDS[t]) if t in NUMBER_WORDS else None
+
+
+def looks_like_answer(req: AiOrderRequest, text: str) -> bool:
+    """A short reply to the open question ("2", "extra wali", "5 box") rather than a new order."""
+    if not req.questions or not text.strip() or len(text) > 60:
+        return False
+    if _number(text) is not None:
+        return True
+    lines = RuleExtractor().extract(text).extraction.lines
+    # A new order normally names a product with a quantity; an answer usually does not.
+    return len(lines) <= 1 and not any(ln.quantity for ln in lines) and len(text.split()) <= 4
+
+
+def apply_customer_answer(session: Session, req: AiOrderRequest, text: str) -> str:
+    """Apply the shop's answer to the first open question; returns the reply to send back.
+    A shop's choice is not saved as approved memory (only staff approve aliases)."""
+    lines = [dict(x) for x in req.lines]
+    target = next((x for x in lines if set(x["issues"]) & BLOCKING), None)
+    if target is None:
+        return "Shukriya! Order update ho gaya."
+    issues = set(target["issues"])
+    ex = Extraction.model_validate(req.extraction)
+    answered = False
+    if issues & {"ambiguous", "not_found"}:
+        n = _number(text)
+        if n is not None and "ambiguous" in issues and 1 <= int(n) <= len(target["candidates"]):
+            target["product_id"] = target["candidates"][int(n) - 1]["product_id"]
+            target["resolution"] = "customer"
+            answered = True
+        else:
+            products = {
+                str(p.id): p
+                for p in session.scalars(select(Product).where(Product.tenant_id == req.tenant_id, Product.is_active.is_(True)))
+            }
+            pool = [products[c["product_id"]] for c in target["candidates"] if c["product_id"] in products]
+            cands = pool or list(products.values())
+            combined = f"{target['phrase']} {text}" if pool else text
+            scored = sorted(
+                ((max(score_product(text, p), score_product(combined, p)), p) for p in cands),
+                key=lambda x: x[0],
+                reverse=True,
+            )
+            if scored and scored[0][0] >= 0.6 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= RESOLVE_GAP):
+                target["product_id"] = str(scored[0][1].id)
+                target["resolution"] = "customer"
+                answered = True
+            elif "not_found" in issues:
+                ex.lines[target["line_no"] - 1].phrase = text.strip()  # search again with the shop's wording
+                answered = True
+    elif issues & {"missing_quantity", "unit_mismatch"}:
+        n = _number(text)
+        if n is not None and n > 0:
+            target["quantity"] = n
+            target["unit"] = None
+            target["resolution"] = "customer"
+            answered = True
+    if not answered:
+        q = first_question(req)
+        return f"Maazrat, samajh nahi aaya. {q}" if q else "Maazrat, samajh nahi aaya."
+    keep = {x["line_no"]: x for x in lines if x.get("resolution") in ("operator", "customer")}
+    req.extraction = ex.model_dump()
+    req.trace = (req.trace or []) + [{"step": "customer_answer", "answer": text[:60], "at": utcnow().isoformat()}]
+    evaluate(session, req, ex, keep=keep)
+    record(
+        session,
+        tenant_id=req.tenant_id,
+        action="ai_order.customer_answered",
+        entity_type="ai_order",
+        entity_id=req.id,
+        data={"number": req.number, "status": req.status},
+    )
+    q = first_question(req)
+    if q:
+        return f"Shukriya! Ab yeh bata dein:\n{q}"
+    return f"Shukriya! Order {req.number} update ho gaya. Hamari team confirm karke bill bhej degi."
 
 
 # ------------------------------------------------------------------ intake
@@ -349,9 +492,13 @@ def submit(
     source_message_id: str,
     customer_id: uuid.UUID | None,
     sender: str | None = None,
+    kind: str = "text",
+    attachment_id: uuid.UUID | None = None,
 ) -> tuple[AiOrderRequest, bool]:
     """Create a request (idempotent per source message) and queue it for the AI worker."""
     text = (text or "").strip()
+    if not text and kind in ("image", "audio"):
+        text = "[photo order]" if kind == "image" else "[voice note]"
     if not text:
         raise OrdexaError(ErrorCode.VALIDATION_ERROR, "order text is empty")
     if len(text) > 4000:
@@ -377,6 +524,8 @@ def submit(
         sender=sender,
         customer_id=customer_id,
         raw_text=text,
+        kind=kind,
+        attachment_id=attachment_id,
         status="received",
         lines=[],
         warnings=[],
@@ -547,7 +696,7 @@ def resolve_line(
         line["quantity"] = float(quantity)
     line["resolution"] = "operator"
     line["unit"] = None  # quantity is now confirmed in the product's selling unit
-    keep = {x["line_no"]: x for x in lines if x.get("resolution") == "operator"}
+    keep = {x["line_no"]: x for x in lines if x.get("resolution") in ("operator", "customer")}
     req.trace = (req.trace or []) + [
         {
             "step": "operator_resolve",
@@ -583,7 +732,7 @@ def add_line(
     ex = Extraction.model_validate(req.extraction or {"lines": []})
     ex.lines.append(ExtractedLine(phrase=p.name, quantity=float(quantity), unit=None, note="added by operator"))
     req.extraction = ex.model_dump()
-    keep = {x["line_no"]: x for x in req.lines if x.get("resolution") == "operator"}
+    keep = {x["line_no"]: x for x in req.lines if x.get("resolution") in ("operator", "customer")}
     keep[len(ex.lines)] = {"product_id": str(p.id), "quantity": float(quantity), "resolution": "operator", "unit": None}
     evaluate(session, req, ex, keep=keep)
     return req
@@ -600,7 +749,7 @@ def remove_line(session: Session, actor: Principal, request_id: uuid.UUID, line_
     del ex.lines[line_no - 1]
     keep = {}
     for new_no, x in enumerate(old, start=1):
-        if x.get("resolution") == "operator":
+        if x.get("resolution") in ("operator", "customer"):
             keep[new_no] = x
     req.extraction = ex.model_dump()
     evaluate(session, req, ex, keep=keep)
@@ -615,7 +764,7 @@ def link_customer(session: Session, actor: Principal, request_id: uuid.UUID, cus
     if not c or c.tenant_id != actor.tenant_id:
         raise OrdexaError(ErrorCode.NOT_FOUND, "customer not found")
     req.customer_id = c.id
-    keep = {x["line_no"]: x for x in req.lines if x.get("resolution") == "operator"}
+    keep = {x["line_no"]: x for x in req.lines if x.get("resolution") in ("operator", "customer")}
     evaluate(session, req, Extraction.model_validate(req.extraction), keep=keep)
     return req
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import uuid
 
 from fastapi import APIRouter, Depends
@@ -39,7 +40,10 @@ class ApproveIn(BaseModel):
 
 class SimulateIn(BaseModel):
     phone: str = Field(min_length=6, max_length=20)
-    text: str = Field(min_length=1, max_length=4000)
+    text: str = Field(default="", max_length=4000)
+    media_kind: str | None = Field(default=None, pattern="^(image|audio)$")  # simulate a photo or voice note
+    media_base64: str | None = Field(default=None, max_length=14_000_000)
+    media_type: str | None = Field(default=None, max_length=100)
 
 
 def contact_out(session: Session, c: WhatsappContact) -> dict:
@@ -141,7 +145,24 @@ def simulate(
     """Test the whole WhatsApp flow without Meta: runs the same bot, AI processing and outbox inline."""
     tenant = session.get(Tenant, p.tenant_id)
     wamid = f"sim.{uuid.uuid4()}"
-    replies = service.handle_inbound(session, tenant, phone=body.phone, text=body.text, wamid=wamid)
+    media = None
+    if body.media_kind:
+        try:
+            data = base64.b64decode(body.media_base64 or "", validate=True)
+        except ValueError as exc:
+            raise OrdexaError(ErrorCode.VALIDATION_ERROR, "media is not valid base64") from exc
+        if not data:
+            raise OrdexaError(ErrorCode.VALIDATION_ERROR, "attach a photo or voice note")
+        media = {
+            "kind": body.media_kind,
+            "data": data,
+            "mime": body.media_type or "application/octet-stream",
+            "caption": body.text or None,
+            "media_id": None,
+        }
+    elif not body.text.strip():
+        raise OrdexaError(ErrorCode.VALIDATION_ERROR, "type a message")
+    replies = service.handle_inbound(session, tenant, phone=body.phone, text=body.text or None, wamid=wamid, media=media)
     session.commit()
     req = session.scalar(
         select(AiOrderRequest).where(AiOrderRequest.tenant_id == tenant.id, AiOrderRequest.source_message_id == wamid)

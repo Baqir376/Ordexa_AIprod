@@ -258,3 +258,10 @@ textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--line); bord
 .bubble.in { align-self: flex-end; background: #d9fdd3; }
 .bubble.out { align-self: flex-start; background: #fff; }
 .lines td.num, .lines th.num { white-space: nowrap; }
+
+.attachment-img { display: block; max-width: 320px; max-height: 260px; margin-top: 8px; border-radius: 6px; cursor: zoom-in; border: 1px solid var(--line); }
+.attachment-zoom { max-width: 92vw; max-height: 92vh; border-radius: 6px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4); }
+.attachment-audio { display: block; margin-top: 8px; width: 320px; }
+.file-btn { position: relative; overflow: hidden; }
+.file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.inline-form .file-btn { flex: 0 0 auto; min-width: 0; }

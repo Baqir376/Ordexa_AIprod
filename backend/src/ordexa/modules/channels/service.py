@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from ordexa.config import get_settings
 from ordexa.modules.ai import service as ai
+from ordexa.modules.ai.models import AiAttachment
 from ordexa.modules.audit.models import record
 from ordexa.modules.channels.models import WhatsappContact, WhatsappMessage, WhatsappNumber
 from ordexa.modules.customers.models import Customer
@@ -155,17 +156,53 @@ def inbound_job(session: Session, job: Job) -> None:
     if tenant is None:
         log.warning("message for unknown business number %s dropped", job.payload.get("phone_number_id"))
         return
-    text = (msg.get("text") or {}).get("body") if msg.get("type") == "text" else None
-    if msg.get("type") == "interactive":
+    mtype = msg.get("type")
+    text = (msg.get("text") or {}).get("body") if mtype == "text" else None
+    media = None
+    if mtype == "interactive":
         reply = msg.get("interactive", {})
         text = (reply.get("button_reply") or reply.get("list_reply") or {}).get("id")
+    elif mtype in ("image", "audio"):
+        m = msg.get(mtype) or {}
+        media = {"kind": mtype, "media_id": m.get("id"), "mime": m.get("mime_type"), "caption": m.get("caption")}
     handle_inbound(
-        session, tenant, phone=msg.get("from", ""), text=text, wamid=msg.get("id") or job.idempotency_key, profile_name=None
+        session,
+        tenant,
+        phone=msg.get("from", ""),
+        text=text,
+        wamid=msg.get("id") or job.idempotency_key,
+        profile_name=None,
+        media=media,
     )
 
 
+MAX_MEDIA_BYTES = 10 * 1024 * 1024
+
+
+def download_media(media_id: str) -> tuple[bytes, str]:
+    """Fetch a WhatsApp media file (photo / voice note) with the Cloud API token."""
+    s = get_settings()
+    auth = {"Authorization": f"Bearer {s.whatsapp_token}"}
+    with urllib.request.urlopen(urllib.request.Request(f"{s.whatsapp_api_base}/{media_id}", headers=auth), timeout=20) as r:  # noqa: S310
+        meta = json.loads(r.read())
+    if int(meta.get("file_size") or 0) > MAX_MEDIA_BYTES:
+        raise ValueError("media file is larger than 10 MB")
+    with urllib.request.urlopen(urllib.request.Request(meta["url"], headers=auth), timeout=60) as r:  # noqa: S310
+        data = r.read(MAX_MEDIA_BYTES + 1)
+    if len(data) > MAX_MEDIA_BYTES:
+        raise ValueError("media file is larger than 10 MB")
+    return data, (meta.get("mime_type") or "application/octet-stream").split(";")[0]
+
+
 def handle_inbound(
-    session: Session, tenant: Tenant, *, phone: str, text: str | None, wamid: str, profile_name: str | None = None
+    session: Session,
+    tenant: Tenant,
+    *,
+    phone: str,
+    text: str | None,
+    wamid: str,
+    profile_name: str | None = None,
+    media: dict | None = None,
 ) -> list[str]:
     """Process one inbound message; returns the reply texts queued (useful for the simulator and tests)."""
     to = normalize_phone(phone)
@@ -187,7 +224,7 @@ def handle_inbound(
         direction="in",
         phone=to,
         wamid=wamid,
-        body=text or "[non-text message]",
+        body=text or (f"[{media['kind']}] {media.get('caption') or ''}".strip() if media else "[non-text message]"),
         status="received",
     )
     session.add(inbound)
@@ -202,8 +239,13 @@ def handle_inbound(
         return []
     if contact.state == "blocked":
         return []
+    if media and contact.state == "verified" and contact.customer_id:
+        _media_order(session, tenant, contact, inbound, media, wamid, to)
+        return replies
+    if text is None and media:
+        text = media.get("caption") or "hi"  # not registered yet: continue the sign-up flow
     if text is None:
-        reply("Maazrat, abhi sirf text message samajh sakte hain. Please type your order.")
+        reply("Maazrat, yeh message type abhi samajh nahi aata. Please type your order, ya photo/voice note bhejein.")
         return replies
     t = text.strip()
     low = re.sub(r"\s+", " ", t.lower()).strip(" .!?")
@@ -219,6 +261,9 @@ def handle_inbound(
                 f"{name}: order bhejne ke liye items aur quantity likhein, e.g. '10 box panadol, 5 patta brufen'.\n"
                 f"Balance dekhne ke liye 'balance' likhein."
             )
+        elif (open_req := ai.open_clarification(session, tenant.id, to)) and ai.looks_like_answer(open_req, t):
+            inbound.ai_order_id = open_req.id
+            reply(ai.apply_customer_answer(session, open_req, t))
         else:
             req, created = ai.submit(
                 session,
@@ -442,3 +487,46 @@ def unlink_contact(session: Session, actor: Principal, contact_id: uuid.UUID) ->
         data={"phone": contact.phone},
     )
     return contact
+
+
+def _media_order(
+    session: Session, tenant: Tenant, contact: WhatsappContact, inbound: WhatsappMessage, media: dict, wamid: str, to: str
+) -> None:
+    """A verified shop sent a photo of its order list or a voice note: keep the file with a new order request.
+    Photos are read by Claude; voice notes wait for staff to listen (or a speech-to-text provider, when added)."""
+    data, mime = media.get("data"), media.get("mime")
+    error = None
+    if data is None and media.get("media_id") and get_settings().whatsapp_token:
+        try:
+            data, mime = download_media(media["media_id"])
+        except Exception as exc:  # noqa: BLE001 - the order still reaches staff, with the error
+            error = f"could not download the {media['kind']}: {exc}"[:300]
+            log.warning("media download failed for %s: %s", wamid, exc)
+    attachment_id = None
+    if data:
+        att = AiAttachment(
+            tenant_id=tenant.id,
+            media_type=(mime or "application/octet-stream"),
+            size=len(data),
+            data=data,
+            source_media_id=media.get("media_id"),
+        )
+        session.add(att)
+        session.flush()
+        attachment_id = att.id
+    req, created = ai.submit(
+        session,
+        tenant_id=tenant.id,
+        text=media.get("caption") or "",
+        source="whatsapp",
+        source_message_id=wamid,
+        customer_id=contact.customer_id,
+        sender=to,
+        kind=media["kind"],
+        attachment_id=attachment_id,
+    )
+    if error:
+        req.error = error
+    inbound.ai_order_id = req.id
+    if created:
+        ai.run_inline_if_configured(session, req)

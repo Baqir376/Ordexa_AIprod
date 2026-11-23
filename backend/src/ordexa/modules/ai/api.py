@@ -3,13 +3,13 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ordexa.modules.ai import service
-from ordexa.modules.ai.models import AiOrderRequest, ProductAlias
+from ordexa.modules.ai.models import AiAttachment, AiOrderRequest, ProductAlias
 from ordexa.modules.catalogue.models import Product
 from ordexa.modules.customers.models import Customer
 from ordexa.modules.identity.service import Principal, current_principal, requires
@@ -67,6 +67,8 @@ def out(session: Session, r: AiOrderRequest, full: bool = True) -> dict:
         "status": r.status,
         "customer": {"id": str(c.id), "code": c.code, "name": c.name} if c else None,
         "raw_text": r.raw_text,
+        "kind": r.kind,
+        "has_attachment": r.attachment_id is not None,
         "received_at": r.received_at.isoformat(),
         "processed_at": r.processed_at.isoformat() if r.processed_at else None,
         "line_count": len(r.lines or []),
@@ -238,3 +240,17 @@ def revoke_alias(alias_id: uuid.UUID, p: Principal = Depends(current_principal),
     service.revoke_alias(session, p, alias_id)
     session.commit()
     return {"ok": True}
+
+
+@router.get("/orders/{request_id}/attachment")
+def attachment(
+    request_id: uuid.UUID, p: Principal = Depends(requires("sales_order.view")), session: Session = Depends(get_session)
+):
+    """The original photo or voice note of an order (tenant-scoped)."""
+    req = service._get(session, p, request_id)
+    att = session.get(AiAttachment, req.attachment_id) if req.attachment_id else None
+    if att is None or att.tenant_id != p.tenant_id:
+        from ordexa.shared.errors import ErrorCode, OrdexaError
+
+        raise OrdexaError(ErrorCode.NOT_FOUND, "this order has no photo or voice note")
+    return Response(content=att.data, media_type=att.media_type, headers={"Cache-Control": "private, max-age=3600"})
