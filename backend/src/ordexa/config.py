@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     groq_model: str = "openai/gpt-oss-120b"  # text orders
     groq_vision_model: str = "qwen/qwen3.8-27b"  # photo orders (Groq preview model; override if retired)
     groq_stt_model: str = "whisper-large-v3"  # voice notes
+    # Free Groq key: read from GROQ_API_KEY (environment or backend/.env); never commit it.
+    groq_api_key: str = Field(default="", validation_alias=AliasChoices("GROQ_API_KEY", "ORDEXA_GROQ_API_KEY"))
     ai_inline: bool = False  # process AI jobs inside the API request (single-process dev); production uses the worker
     # WhatsApp Cloud API (outbound)
     whatsapp_token: str = ""

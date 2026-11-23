@@ -8,6 +8,8 @@ import os
 BASE_URL = os.environ.get("ORDEXA_TEST_DATABASE_URL", "postgresql+psycopg://ordexa:ordexa@localhost:5432/ordexa_test")
 os.environ["ORDEXA_DATABASE_URL"] = BASE_URL
 os.environ["ORDEXA_AI_PROVIDER"] = "rules"  # tests never call a live LLM
+os.environ["GROQ_API_KEY"] = ""  # ignore any real key in backend/.env
+os.environ["ANTHROPIC_API_KEY"] = ""
 os.environ["ORDEXA_WHATSAPP_TOKEN"] = ""  # outbound WhatsApp is simulated
 
 from pathlib import Path

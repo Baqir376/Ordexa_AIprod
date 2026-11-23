@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import urllib.error
 import urllib.request
 import uuid
@@ -30,11 +29,13 @@ STT_PROMPT = (
 
 
 def configured() -> bool:
-    return bool(os.environ.get("GROQ_API_KEY"))
+    """A Groq key is set and AI is not switched off (ORDEXA_AI_PROVIDER=rules)."""
+    s = get_settings()
+    return bool(s.groq_api_key) and s.ai_provider != "rules"
 
 
 def _headers(content_type: str) -> dict:
-    return {"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}", "Content-Type": content_type, "User-Agent": "ordexa-erp"}
+    return {"Authorization": f"Bearer {get_settings().groq_api_key}", "Content-Type": content_type, "User-Agent": "ordexa-erp"}
 
 
 def _post(path: str, body: bytes, content_type: str, timeout: int = 60) -> dict:
