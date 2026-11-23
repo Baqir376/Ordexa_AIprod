@@ -56,3 +56,31 @@ Follow [ADR 0006](adr/0006-whatsapp-onboarding.md). For the webhook URL use
 ## Paid / production layout
 Use `docker-compose.yml`. It runs separate `api`, `webhook`, `worker-ai`, `worker-channels` and `worker-outbox`
 containers, so one crashing never stops the others. Point all of them at a managed Postgres with backups.
+
+## Free AI: Groq
+Get a free key at https://console.groq.com (no credit card) and set `GROQ_API_KEY` on the server. With it:
+
+| Order type | What happens | Groq model (override with env) |
+|---|---|---|
+| Text (English / Roman Urdu / Urdu) | Read into order lines (strict JSON) | `openai/gpt-oss-120b` (`ORDEXA_GROQ_MODEL`) |
+| Photo of an order list | Read into order lines | `qwen/qwen3.8-27b` (preview; `ORDEXA_GROQ_VISION_MODEL`) |
+| Voice note | Transcribed with Whisper, then read like text; the transcript is shown to staff | `whisper-large-v3` (`ORDEXA_GROQ_STT_MODEL`) |
+
+**Limits and safeguards:**
+- The free tier is rate-limited, roughly tens of requests per minute. That's enough for a pilot.
+- If a request hits the limit or Groq is down, text orders fall back to the built-in parser, and photos and voice
+  notes wait for staff on the order screen. Nothing is lost.
+- Groq retires models over time. If one stops working, set the env variable to the replacement listed at
+  https://console.groq.com/docs/deprecations.
+- **Privacy:** order texts, photos and voice notes are sent to Groq for processing. Mention this in your terms with
+  shops.
+
+## WhatsApp costs
+- **No Meta subscription:** the WhatsApp Cloud API itself has no monthly fee.
+- **Test number:** Meta's test number is free, but it can only message up to 5 phone numbers you verify. That's
+  enough to pilot with a few shops.
+- **Replies may be charged:** Meta charges per message for templates (e.g. the sign-up code). Guides disagree on
+  whether replies inside the 24-hour window are still free after 1 October 2026. Check Meta's pricing page for
+  Pakistan before going live.
+- **Avoid unofficial WhatsApp tools** that log in as WhatsApp Web. They break WhatsApp's terms, and the number can
+  be banned.

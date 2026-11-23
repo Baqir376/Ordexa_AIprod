@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ordexa.config import get_settings
+from ordexa.modules.ai import groq
 from ordexa.modules.ai.extract import (
     ExtractedLine,
     Extraction,
@@ -247,11 +248,17 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
 
     warnings: list[dict] = []
     if not lines and req.kind == "audio":
-        warnings.append({"code": "voice_note", "message": "Voice note: play it and add the items with '+ Add item'."})
+        warnings.append(
+            {
+                "code": "voice_note",
+                "message": "Voice note: play it and add the items with '+ Add item'"
+                + (" (set a free GROQ_API_KEY to transcribe voice notes automatically)." if not groq.configured() else "."),
+            }
+        )
     elif not lines and req.kind == "image":
         how = (
-            "set ANTHROPIC_API_KEY to read photos automatically"
-            if not (req.extractor or "").startswith("anthropic")
+            "set a free GROQ_API_KEY to read photos automatically"
+            if not (req.extractor or "").startswith(("anthropic", "groq"))
             else "the photo could not be read"
         )
         warnings.append({"code": "photo_unread", "message": f"Photo order: look at the picture and add the items ({how})."})
@@ -314,6 +321,7 @@ def process_request(session: Session, request_id: uuid.UUID) -> AiOrderRequest:
     if req.status not in ("received", "processing", "failed"):
         return req  # already processed (job retried after success)
     req.status = "processing"
+    voice_trace = None
     image = None
     text = req.raw_text
     if req.attachment_id:
@@ -322,11 +330,17 @@ def process_request(session: Session, request_id: uuid.UUID) -> AiOrderRequest:
             image = (att.data, att.media_type)
             text = "" if req.raw_text.startswith("[") else req.raw_text
         elif req.kind == "audio":
-            text = att.transcript or ""  # speech-to-text when a provider is configured; else staff listen
+            if att.transcript is None and groq.configured():
+                try:
+                    att.transcript = groq.transcribe(att.data, att.media_type)
+                    voice_trace = {"step": "speech_to_text", "provider": "groq", "chars": len(att.transcript)}
+                except Exception as exc:  # noqa: BLE001 - staff can still listen to the voice note
+                    voice_trace = {"step": "speech_to_text", "provider": "groq", "error": str(exc)[:300]}
+            text = att.transcript or ""  # transcript read like a text order; without one, staff listen
     result = extract_order(text, image) if (text or image) else ExtractResult(Extraction(), "none", [])
     req.extractor = result.extractor
     req.extraction = result.extraction.model_dump()
-    req.trace = result.trace
+    req.trace = ([voice_trace] if voice_trace else []) + result.trace
     req.error = None
     evaluate(session, req, result.extraction)
     record(

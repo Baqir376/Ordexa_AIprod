@@ -23,9 +23,13 @@ class Settings(BaseSettings):
     # Run the ai/channels/outbox workers as threads inside the API process. For single-process hosting
     # (free tiers); with separate worker processes (docker-compose) leave it off.
     embedded_workers: bool = False
-    # AI order understanding. "auto" = Claude when an Anthropic credential is configured, else the rule parser.
-    ai_provider: str = "auto"  # auto | anthropic | rules
+    # AI order understanding. "auto" = Claude if an Anthropic key is set, else Groq (free tier) if GROQ_API_KEY is
+    # set, else the built-in rule parser.
+    ai_provider: str = "auto"  # auto | anthropic | groq | rules
     ai_model: str = "claude-opus-5-5"
+    groq_model: str = "openai/gpt-oss-120b"  # text orders
+    groq_vision_model: str = "qwen/qwen3.8-27b"  # photo orders (Groq preview model; override if retired)
+    groq_stt_model: str = "whisper-large-v3"  # voice notes
     ai_inline: bool = False  # process AI jobs inside the API request (single-process dev); production uses the worker
     # WhatsApp Cloud API (outbound)
     whatsapp_token: str = ""

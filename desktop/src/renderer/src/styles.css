@@ -265,3 +265,4 @@ textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--line); bord
 .file-btn { position: relative; overflow: hidden; }
 .file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .inline-form .file-btn { flex: 0 0 auto; min-width: 0; }
+.transcript { margin-top: 6px; font-style: italic; }

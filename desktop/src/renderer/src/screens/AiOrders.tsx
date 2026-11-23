@@ -33,6 +33,7 @@ interface Order {
   raw_text: string
   kind?: 'text' | 'image' | 'audio'
   has_attachment?: boolean
+  transcript?: string | null
   received_at: string
   line_count: number
   warnings: { code: string; message: string }[]
@@ -153,6 +154,7 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
         <div className="muted small">{order.source === 'whatsapp' ? `WhatsApp ${order.sender ?? ''}` : 'Typed by staff'} · {new Date(order.received_at).toLocaleString('en-PK')}</div>
         {order.raw_text.startsWith('[') && order.kind !== 'text' ? null : order.raw_text}
         {order.has_attachment && <Attachment orderId={order.id} kind={order.kind ?? 'text'} />}
+        {order.transcript && <div className="transcript"><span className="muted small">Heard in the voice note:</span> {order.transcript}</div>}
       </div>
       {order.warnings.map((w) => <div key={w.code} className={`alert ${w.code === 'contains_instructions' ? 'error' : 'warn'}`}>{w.message}</div>)}
       {order.status === 'received' || order.status === 'processing' ? (

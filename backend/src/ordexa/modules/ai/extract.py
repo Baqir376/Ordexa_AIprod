@@ -444,9 +444,20 @@ def _anthropic_configured() -> bool:
     return any(os.environ.get(k) for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"))
 
 
+def ai_reader() -> str:
+    """Which reader handles orders: "anthropic", "groq" (free tier) or "rules"."""
+    from ordexa.modules.ai import groq
+
+    p = get_settings().ai_provider
+    if p in ("anthropic", "groq", "rules"):
+        return p
+    if _anthropic_configured():
+        return "anthropic"
+    return "groq" if groq.configured() else "rules"
+
+
 def claude_enabled() -> bool:
-    s = get_settings()
-    return s.ai_provider == "anthropic" or (s.ai_provider == "auto" and _anthropic_configured())
+    return ai_reader() == "anthropic"
 
 
 def extract_order(text: str, image: tuple[bytes, str] | None = None) -> ExtractResult:
@@ -455,16 +466,29 @@ def extract_order(text: str, image: tuple[bytes, str] | None = None) -> ExtractR
     s = get_settings()
     if image is not None and image[1] not in IMAGE_TYPES:
         image = None
-    if claude_enabled():
+    reader = ai_reader()
+    if reader in ("anthropic", "groq"):
         try:
-            result = ClaudeExtractor(s.ai_model).extract(text, image)
+            if reader == "anthropic":
+                result = ClaudeExtractor(s.ai_model).extract(text, image)
+            else:
+                from ordexa.modules.ai.groq import GroqExtractor
+
+                result = GroqExtractor().extract(text, image)
             if not INSTRUCTION_RE.search(text) or result.extraction.contains_instructions:
                 return result
             result.extraction.contains_instructions = True  # the deterministic check also flags it
             return result
         except Exception as exc:  # noqa: BLE001 - provider outage, auth, refusal, invalid output
-            log.warning("Claude extraction failed, using rules: %s", exc)
+            log.warning("%s extraction failed, using rules: %s", reader, exc)
             fallback = RuleExtractor().extract(text)
-            fallback.trace.insert(0, {"step": "extract", "extractor": f"anthropic:{s.ai_model}", "error": str(exc)[:300]})
+            fallback.trace.insert(
+                0,
+                {
+                    "step": "extract",
+                    "extractor": reader if reader == "groq" else f"anthropic:{s.ai_model}",
+                    "error": str(exc)[:300],
+                },
+            )
             return fallback
     return RuleExtractor().extract(text)

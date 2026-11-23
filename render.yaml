@@ -21,8 +21,10 @@ services:
         value: "true"
       - key: ORDEXA_AI_PROVIDER
         value: auto
+      - key: GROQ_API_KEY
+        sync: false # FREE (console.groq.com, no card): reads text orders, photo orders and voice notes
       - key: ANTHROPIC_API_KEY
-        sync: false # optional: Claude reads WhatsApp orders; without it the rule parser is used
+        sync: false # optional, paid alternative to Groq
       - key: ORDEXA_WHATSAPP_VERIFY_TOKEN
         sync: false
       - key: ORDEXA_WHATSAPP_APP_SECRET

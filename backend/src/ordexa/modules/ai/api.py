@@ -68,6 +68,7 @@ def out(session: Session, r: AiOrderRequest, full: bool = True) -> dict:
         "customer": {"id": str(c.id), "code": c.code, "name": c.name} if c else None,
         "raw_text": r.raw_text,
         "kind": r.kind,
+        "transcript": session.get(AiAttachment, r.attachment_id).transcript if r.attachment_id and r.kind == "audio" else None,
         "has_attachment": r.attachment_id is not None,
         "received_at": r.received_at.isoformat(),
         "processed_at": r.processed_at.isoformat() if r.processed_at else None,
