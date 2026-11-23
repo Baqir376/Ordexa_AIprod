@@ -17,3 +17,8 @@ desktop/dist/
 *.db
 *.db-wal
 *.db-shm
+
+# Test artefacts
+desktop/tests/smoke/screenshots/
+desktop/tests/smoke/tour-screenshots/
+*.log

@@ -1,0 +1,33 @@
+# Render Blueprint: free single-process deployment of the Ordexa API.
+# Database: a free Neon Postgres (see docs/DEPLOY.md); paste its connection string as DATABASE_URL.
+services:
+  - type: web
+    name: ordexa-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        sync: false # Neon connection string, e.g. postgresql://user:pass@ep-xxx.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+      - key: ORDEXA_ENVIRONMENT
+        value: production
+      - key: ORDEXA_JWT_SECRET
+        generateValue: true
+      - key: ORDEXA_EMBEDDED_WORKERS
+        value: "true"
+      - key: ORDEXA_AI_PROVIDER
+        value: auto
+      - key: ANTHROPIC_API_KEY
+        sync: false # optional: Claude reads WhatsApp orders; without it the rule parser is used
+      - key: ORDEXA_WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: ORDEXA_WHATSAPP_APP_SECRET
+        sync: false
+      - key: ORDEXA_WHATSAPP_TOKEN
+        sync: false
+      - key: ORDEXA_WHATSAPP_PHONE_NUMBER_ID
+        sync: false

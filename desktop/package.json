@@ -60,12 +60,6 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "shortcutName": "Ordexa ERP"
-    },
-    "publish": [
-      {
-        "provider": "generic",
-        "url": "https://updates.example.invalid/ordexa/${channel}"
-      }
-    ]
+    }
   }
 }

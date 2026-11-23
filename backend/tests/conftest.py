@@ -45,6 +45,9 @@ def database():
 
 @pytest.fixture(autouse=True)
 def clean(database):
+    from ordexa.modules.identity import service as identity
+
+    identity._failures.clear()
     yield
     import ordexa.models  # noqa: F401
 

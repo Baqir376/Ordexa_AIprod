@@ -129,6 +129,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="ordexa")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("migrate", help="apply database migrations (alembic upgrade head)")
+    sv = sub.add_parser("serve", help="apply migrations, then serve the API on $PORT (hosting entry point)")
+    sv.add_argument("--port", type=int, default=None)
     ct = sub.add_parser("create-tenant", help="create a business with its owner Administrator")
     ct.add_argument("--code", required=True)
     ct.add_argument("--name", required=True)
@@ -139,6 +141,18 @@ def main(argv: list[str] | None = None) -> None:
     sd = sub.add_parser("seed-demo", help="load synthetic pharma demo data into a business")
     sd.add_argument("--code", required=True)
     args = parser.parse_args(argv)
+
+    if args.cmd == "serve":
+        import logging
+        import os
+
+        import uvicorn
+
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+        main(["migrate"])
+        port = args.port or int(os.environ.get("PORT", "8000"))
+        uvicorn.run("ordexa.apps.api:app", host="0.0.0.0", port=port, proxy_headers=True, forwarded_allow_ips="*")
+        return
 
     if args.cmd == "migrate":
         from alembic import command

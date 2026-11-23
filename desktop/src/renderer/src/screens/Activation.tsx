@@ -5,7 +5,7 @@ import { ordexa } from '../bridge'
 
 export function Activation({ onDone }: { onDone: (s: AppState) => void }) {
   const [form, setForm] = useState({
-    serverUrl: 'http://127.0.0.1:8000',
+    serverUrl: (import.meta.env.VITE_ORDEXA_SERVER_URL as string | undefined) ?? 'http://127.0.0.1:8000',
     tenantCode: '',
     username: 'admin',
     password: '',

@@ -136,3 +136,14 @@ describe('billing (offline)', () => {
     expect(billing.searchCustomers('101')[0].name).toBe('Madina Medical Store')
   })
 })
+
+describe('server address check', () => {
+  it('requires https on the internet but allows local addresses', async () => {
+    const { checkServerUrl } = await import('../src/core/api')
+    expect(checkServerUrl('https://ordexa-api.onrender.com/')).toBe('https://ordexa-api.onrender.com')
+    expect(checkServerUrl('http://127.0.0.1:8000')).toBe('http://127.0.0.1:8000')
+    expect(checkServerUrl('http://192.168.1.20:8000')).toBe('http://192.168.1.20:8000')
+    expect(() => checkServerUrl('http://ordexa.example.com')).toThrow(/https/)
+    expect(() => checkServerUrl('not a url')).toThrow(/valid URL/)
+  })
+})

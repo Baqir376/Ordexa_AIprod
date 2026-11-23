@@ -1,5 +1,6 @@
-"""Background worker process. One process per queue (``ai``, ``outbox``, ``default``) so a crash or a
-slow LLM call in one queue never affects billing or the other queues.
+"""Background workers. Normally one process per queue (``ai``, ``channels``, ``outbox``) so a crash or a slow LLM
+call in one queue never affects billing or the other queues. For single-process hosting the same loops can run as
+threads inside the API (``ORDEXA_EMBEDDED_WORKERS=true``).
 
 Run: ``python -m ordexa.apps.worker --queue ai``
 """
@@ -9,8 +10,10 @@ from __future__ import annotations
 import argparse
 import logging
 import signal
+import threading
 import time
 import uuid
+from collections.abc import Callable
 
 from sqlalchemy.orm import Session
 
@@ -22,15 +25,30 @@ from ordexa.shared.db import get_sessionmaker
 
 log = logging.getLogger("ordexa.worker")
 
+WORKER_QUEUES = ("ai", "channels", "outbox")
+
 
 def _ping(session: Session, job: Job) -> None:
     log.info("ping job %s payload=%s", job.id, job.payload)
 
 
 def _ai_process(session: Session, job: Job) -> None:
+    from ordexa.modules.ai.models import AiOrderRequest
     from ordexa.modules.ai.service import process_request
 
-    process_request(session, uuid.UUID(job.payload["request_id"]))
+    request_id = uuid.UUID(job.payload["request_id"])
+    try:
+        process_request(session, request_id)
+    except Exception as exc:
+        # Record the failure on the order so staff see it (and can press "reprocess"); the job itself is retried
+        # with backoff by run_one, and a retry reprocesses a request in the "failed" state.
+        session.rollback()
+        req = session.get(AiOrderRequest, request_id)
+        if req is not None:
+            req.status = "failed"
+            req.error = f"{type(exc).__name__}: {exc}"[:2000]
+            session.commit()
+        raise
 
 
 def _wa_inbound(session: Session, job: Job) -> None:
@@ -53,35 +71,44 @@ HANDLERS = {
 }
 
 
+def run_loop(queue: str, should_stop: Callable[[], bool], once: bool = False) -> None:
+    """Claim and run jobs from one queue until ``should_stop()``; never dies on a job or database error."""
+    log.info("worker started on queue '%s'", queue)
+    poll = get_settings().worker_poll_seconds
+    while not should_stop():
+        try:
+            with get_sessionmaker()() as session:
+                worked = run_one(session, queue, HANDLERS[queue])
+        except Exception:
+            log.exception("worker loop error on queue '%s'", queue)
+            worked = False
+            time.sleep(5)
+        if once and not worked:
+            break
+        if not worked:
+            time.sleep(poll)
+    log.info("worker stopped on queue '%s'", queue)
+
+
+def start_embedded(stop: threading.Event) -> list[threading.Thread]:
+    threads = []
+    for q in WORKER_QUEUES:
+        t = threading.Thread(target=run_loop, args=(q, stop.is_set), name=f"ordexa-worker-{q}", daemon=True)
+        t.start()
+        threads.append(t)
+    return threads
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ordexa background worker")
     parser.add_argument("--queue", default="default", choices=sorted(HANDLERS))
     parser.add_argument("--once", action="store_true", help="process available jobs, then exit")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    stop = False
-
-    def _stop(*_):
-        nonlocal stop
-        stop = True
-
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
-    log.info("worker started on queue '%s'", args.queue)
-    poll = get_settings().worker_poll_seconds
-    while not stop:
-        try:
-            with get_sessionmaker()() as session:
-                worked = run_one(session, args.queue, HANDLERS[args.queue])
-        except Exception:
-            log.exception("worker loop error")
-            worked = False
-            time.sleep(5)
-        if args.once and not worked:
-            break
-        if not worked:
-            time.sleep(poll)
-    log.info("worker stopped")
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    run_loop(args.queue, stop.is_set, once=args.once)
 
 
 if __name__ == "__main__":

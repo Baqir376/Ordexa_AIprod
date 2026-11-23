@@ -3,7 +3,7 @@
 
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 
-import { ApiError, NetworkError, apiRequest, type ApiOptions } from './api'
+import { ApiError, NetworkError, apiRequest, checkServerUrl, type ApiOptions } from './api'
 import { Billing } from './billing'
 import { LocalStore } from './localStore'
 import { SyncEngine, type SyncSummary } from './sync'
@@ -63,7 +63,7 @@ export class OrdexaClient {
   /** First run: an Administrator signs in online and registers this PC (gets its T-series). */
   async activate(input: { serverUrl: string; tenantCode: string; username: string; password: string; deviceName: string }): Promise<AppState> {
     if (this.store.getMeta('device_id')) throw new Error('This PC is already activated.')
-    const opts: ApiOptions = { baseUrl: input.serverUrl.trim() }
+    const opts: ApiOptions = { baseUrl: checkServerUrl(input.serverUrl), timeoutMs: 90_000 }
     const login = await apiRequest<LoginResponse>(opts, 'POST', '/api/v1/auth/login', {
       tenant_code: input.tenantCode,
       username: input.username,
@@ -109,7 +109,8 @@ export class OrdexaClient {
     if (!tenantCode) throw new Error('This PC is not activated.')
     const uname = username.trim().toLowerCase()
     try {
-      const login = await apiRequest<LoginResponse>(this.apiOptions(), 'POST', '/api/v1/auth/login', {
+      // Short wait at the counter: if the server is asleep or unreachable, unlock offline instead.
+      const login = await apiRequest<LoginResponse>({ ...this.apiOptions(), timeoutMs: 25_000 }, 'POST', '/api/v1/auth/login', {
         tenant_code: tenantCode,
         username: uname,
         password,

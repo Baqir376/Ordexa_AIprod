@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +20,9 @@ class Settings(BaseSettings):
     whatsapp_verify_token: str = ""
     whatsapp_app_secret: str = ""
     worker_poll_seconds: float = 1.0
+    # Run the ai/channels/outbox workers as threads inside the API process. For single-process hosting
+    # (free tiers); with separate worker processes (docker-compose) leave it off.
+    embedded_workers: bool = False
     # AI order understanding. "auto" = Claude when an Anthropic credential is configured, else the rule parser.
     ai_provider: str = "auto"  # auto | anthropic | rules
     ai_model: str = "claude-opus-5-5"
@@ -27,11 +32,29 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: str = ""
     whatsapp_tenant_code: str = ""  # which business this WhatsApp number belongs to
     whatsapp_api_base: str = "https://graph.facebook.com/v21.0"
+    # Login protection: failed attempts per business+username within the window before a temporary lock.
+    login_max_failures: int = 10
+    login_window_minutes: int = 15
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _normalise_db_url(cls, v: str) -> str:
+        """Hosted Postgres providers (Neon, Render, Supabase...) hand out postgres:// URLs; use the psycopg 3 driver."""
+        v = (v or "").strip()
+        for prefix in ("postgres://", "postgresql://"):
+            if v.startswith(prefix):
+                return "postgresql+psycopg://" + v[len(prefix) :]
+        return v
 
 
 @lru_cache
 def get_settings() -> Settings:
-    s = Settings()
-    if s.environment == "production" and s.jwt_secret.startswith("dev-only"):
-        raise RuntimeError("ORDEXA_JWT_SECRET must be set in production")
+    # Common hosting convention: a plain DATABASE_URL is used when ORDEXA_DATABASE_URL is not set.
+    if not os.environ.get("ORDEXA_DATABASE_URL") and os.environ.get("DATABASE_URL"):
+        s = Settings(database_url=os.environ["DATABASE_URL"])
+    else:
+        s = Settings()
+    if s.environment == "production":
+        if s.jwt_secret.startswith("dev-only") or len(s.jwt_secret) < 32:
+            raise RuntimeError("ORDEXA_JWT_SECRET must be set to a random value of at least 32 characters in production")
     return s

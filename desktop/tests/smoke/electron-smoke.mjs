@@ -8,8 +8,12 @@ import { _electron as electron } from 'playwright-core'
 
 const [code, password, shots = '.'] = process.argv.slice(2)
 const dataDir = mkdtempSync(join(tmpdir(), 'ordexa-smoke-'))
-const app = await electron.launch({ args: ['.'], env: { ...process.env, ORDEXA_DATA_DIR: dataDir } })
+const env = { ...process.env, ORDEXA_DATA_DIR: dataDir }
+delete env.ELECTRON_RUN_AS_NODE
+const app = await electron.launch({ args: ['.'], env })
 const page = await app.firstWindow()
+page.on('console', (msg) => console.log('PAGE LOG:', msg.text()))
+page.on('pageerror', (err) => console.log('PAGE ERR:', err))
 const shot = (name) => page.screenshot({ path: join(shots, `${name}.png`) })
 page.setDefaultTimeout(15_000)
 
@@ -65,6 +69,7 @@ ${receipt}`)
   await shot('6-bills')
   console.log('SMOKE OK', dataDir)
 } catch (e) {
+  try { console.log('PAGE TEXT ON FAILURE:\n', await page.locator('body').innerText()) } catch {}
   await shot('error')
   console.error('SMOKE FAILED', e)
   process.exitCode = 1

@@ -31,16 +31,43 @@ export async function apiRequest<T>(opts: ApiOptions, method: 'GET' | 'POST' | '
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? 60_000), // free hosting tiers can take ~50 s to wake up
     })
   } catch (e) {
     throw new NetworkError(`server unreachable: ${(e as Error).message}`)
   }
   const text = await res.text()
-  const data = text ? JSON.parse(text) : null
+  let data: any = null
+  try {
+    data = text ? JSON.parse(text) : null
+  } catch {
+    // Not our API answering (hosting proxy page while the server wakes up or restarts).
+    if (res.status === 502 || res.status === 503 || res.status === 504 || res.ok) {
+      throw new NetworkError(`server not ready (HTTP ${res.status})`)
+    }
+  }
+  if (res.status === 502 || res.status === 503 || res.status === 504) {
+    throw new NetworkError(`server not ready (HTTP ${res.status})`)
+  }
   if (!res.ok) {
     const err = data?.error
     throw new ApiError(res.status, err?.code ?? 'HTTP_ERROR', err?.message ?? data?.detail?.[0]?.msg ?? `HTTP ${res.status}`)
   }
   return data as T
+}
+
+/** Production servers must use HTTPS (passwords and business data travel over it). Plain http is allowed only for
+ * this PC or the shop's own network (development / on-premise). */
+export function checkServerUrl(raw: string): string {
+  let u: URL
+  try {
+    u = new URL(raw.trim())
+  } catch {
+    throw new Error('Server address is not a valid URL, e.g. https://ordexa-api.onrender.com')
+  }
+  const local = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(u.hostname)
+  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && local)) {
+    throw new Error('Use an https:// server address (http is only allowed on this PC or the local network).')
+  }
+  return u.origin
 }

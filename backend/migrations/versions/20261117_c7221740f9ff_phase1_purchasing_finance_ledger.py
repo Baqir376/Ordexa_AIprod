@@ -4,16 +4,15 @@ Revision ID: c7221740f9ff
 Revises: f30b77b85cfe
 Create Date: 2026-11-17 22:23:48.816168
 """
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 revision: str = 'c7221740f9ff'
-down_revision: Union[str, None] = 'f30b77b85cfe'
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = 'f30b77b85cfe'
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:

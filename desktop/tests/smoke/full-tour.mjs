@@ -7,7 +7,9 @@ import { join } from 'node:path'
 import { _electron as electron } from 'playwright-core'
 
 const [code, password, shots = '.'] = process.argv.slice(2)
-const app = await electron.launch({ args: ['.'], env: { ...process.env, ORDEXA_DATA_DIR: mkdtempSync(join(tmpdir(), 'ordexa-tour-')) } })
+const env = { ...process.env, ORDEXA_DATA_DIR: mkdtempSync(join(tmpdir(), 'ordexa-tour-')) }
+delete env.ELECTRON_RUN_AS_NODE
+const app = await electron.launch({ args: ['.'], env })
 const page = await app.firstWindow()
 page.setDefaultTimeout(15_000)
 const shot = (name) => page.screenshot({ path: join(shots, `${name}.png`) })

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import threading
+import time
 import uuid
+from collections import defaultdict, deque
 from dataclasses import dataclass
 
 from fastapi import Depends, Header
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ordexa.config import get_settings
 from ordexa.modules.audit.models import record
 from ordexa.modules.identity.models import ROLE_ADMIN, ROLE_STAFF, User, UserPermission
 from ordexa.modules.identity.permissions import ALL_PERMISSIONS, GRANTABLE
@@ -42,12 +46,39 @@ def effective_permissions(session: Session, user: User) -> frozenset[str]:
     return frozenset(rows) & GRANTABLE
 
 
+_failures: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+_failures_lock = threading.Lock()
+
+
+def _throttled(key: tuple[str, str]) -> bool:
+    s = get_settings()
+    window = s.login_window_minutes * 60
+    now = time.monotonic()
+    with _failures_lock:
+        q = _failures[key]
+        while q and now - q[0] > window:
+            q.popleft()
+        return len(q) >= s.login_max_failures
+
+
+def _record_failure(key: tuple[str, str]) -> None:
+    with _failures_lock:
+        _failures[key].append(time.monotonic())
+
+
 def login(session: Session, *, tenant_code: str, username: str, password: str) -> dict:
-    tenant = session.scalar(select(Tenant).where(Tenant.code == tenant_code.strip().lower()))
-    user = tenant and session.scalar(select(User).where(User.tenant_id == tenant.id, User.username == username.strip().lower()))
+    key = (tenant_code.strip().lower(), username.strip().lower())
+    if _throttled(key):
+        # Slows password guessing; per process (a single API instance in the pilot).
+        raise OrdexaError(ErrorCode.RATE_LIMITED, "too many failed sign-ins; wait 15 minutes and try again")
+    tenant = session.scalar(select(Tenant).where(Tenant.code == key[0]))
+    user = tenant and session.scalar(select(User).where(User.tenant_id == tenant.id, User.username == key[1]))
     # Same error for unknown tenant, unknown user, wrong password or inactive user.
     if not user or not user.is_active or not verify_password(user.password_hash, password):
+        _record_failure(key)
         raise OrdexaError(ErrorCode.AUTHENTICATION_REQUIRED, "invalid business code, username or password")
+    with _failures_lock:
+        _failures.pop(key, None)
     token, exp = issue_token(user_id=user.id, tenant_id=tenant.id, perm_version=user.perm_version)
     perms = effective_permissions(session, user)
     return {

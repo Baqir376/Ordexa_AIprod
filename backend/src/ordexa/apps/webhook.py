@@ -1,15 +1,19 @@
-"""WhatsApp webhook receiver: a separate, tiny process. It only verifies the signature and durably enqueues
-the event, so it stays up even if the API or the AI worker is down, and Meta always gets a fast 200.
+"""WhatsApp webhook receiver. It only verifies the signature and durably enqueues the event, so Meta always
+gets a fast 200 and processing happens in the channels worker.
 
-Run: ``uvicorn ordexa.apps.webhook:app --port 8001``
+Deploy it either as its own tiny process (``uvicorn ordexa.apps.webhook:app --port 8001``, see docker-compose) so it
+stays up even if the API is down, or mounted inside the API (the API always includes ``router``) for single-process
+hosting.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import json
+import logging
 
-from fastapi import FastAPI, Query, Request
+from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 import ordexa.models  # noqa: F401  (register every table so foreign keys resolve)
@@ -17,7 +21,8 @@ from ordexa.config import get_settings
 from ordexa.modules.jobs.service import enqueue
 from ordexa.shared.db import get_sessionmaker
 
-app = FastAPI(title="Ordexa webhook receiver", docs_url=None, redoc_url=None)
+log = logging.getLogger("ordexa.webhook")
+router = APIRouter(tags=["webhooks"])
 
 
 def valid_signature(raw: bytes, header: str | None, secret: str) -> bool:
@@ -27,12 +32,7 @@ def valid_signature(raw: bytes, header: str | None, secret: str) -> bool:
     return hmac.compare_digest(expected, header.split("=", 1)[1].strip())
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "service": "webhook"}
-
-
-@app.get("/webhooks/whatsapp")
+@router.get("/webhooks/whatsapp")
 def verify(
     mode: str = Query("", alias="hub.mode"),
     token: str = Query("", alias="hub.verify_token"),
@@ -44,12 +44,15 @@ def verify(
     return PlainTextResponse("forbidden", status_code=403)
 
 
-@app.post("/webhooks/whatsapp")
+@router.post("/webhooks/whatsapp")
 async def receive(request: Request):
     raw = await request.body()
     if not valid_signature(raw, request.headers.get("x-hub-signature-256"), get_settings().whatsapp_app_secret):
         return JSONResponse({"error": "invalid signature"}, status_code=401)
-    payload = await request.json()
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
     enqueued = 0
     with get_sessionmaker()() as session:
         for entry in payload.get("entry") or []:
@@ -68,3 +71,12 @@ async def receive(request: Request):
                         enqueued += 1
         session.commit()
     return {"received": True, "enqueued": enqueued}
+
+
+app = FastAPI(title="Ordexa webhook receiver", docs_url=None, redoc_url=None)
+app.include_router(router)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "webhook"}

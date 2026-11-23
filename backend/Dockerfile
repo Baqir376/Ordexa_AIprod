@@ -7,4 +7,5 @@ COPY migrations ./migrations
 RUN pip install --no-cache-dir . && useradd --create-home ordexa
 USER ordexa
 EXPOSE 8000
-CMD ["uvicorn", "ordexa.apps.api:app", "--host", "0.0.0.0", "--port", "8000"]
+# Migrates the database, then serves on $PORT (default 8000). Hosts like Render/Koyeb set PORT.
+CMD ["ordexa", "serve"]
