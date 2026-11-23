@@ -19,7 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ordexa.config import get_settings
-from ordexa.modules.ai import groq
+from ordexa.modules.ai import groq, guardrails
 from ordexa.modules.ai.extract import (
     ExtractedLine,
     Extraction,
@@ -47,7 +47,8 @@ log = logging.getLogger("ordexa.ai")
 RESOLVE_MIN = 0.75  # top candidate score needed to resolve without a person
 RESOLVE_GAP = 0.12  # and its lead over the runner-up
 CANDIDATE_MIN = 0.45
-BLOCKING = {"ambiguous", "not_found", "missing_quantity", "unit_mismatch", "inactive_product"}
+BLOCKING = {"ambiguous", "not_found", "missing_quantity", "unit_mismatch", "inactive_product"} | guardrails.BLOCKING_FLAGS
+QTY_FLAGS = {"quantity_not_in_message", "unusual_quantity", "fractional_quantity"}
 
 
 def utcnow() -> datetime:
@@ -175,7 +176,16 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
             "available": None,
         }
         if i in keep:
-            line.update({k: keep[i][k] for k in ("product_id", "quantity", "resolution", "unit") if k in keep[i]})
+            line.update(
+                {k: keep[i][k] for k in ("product_id", "quantity", "resolution", "unit", "quantity_confirmed") if k in keep[i]}
+            )
+        # Guardrail flags from extraction; a person (operator) or the shop's own answer clears what it confirms.
+        flags = list(ex.flags)
+        if line["resolution"] == "operator":
+            flags = []
+        elif line["resolution"] == "customer" and keep.get(i, {}).get("quantity_confirmed"):
+            flags = [f for f in flags if f not in QTY_FLAGS]
+        line["issues"].extend(flags)
         product = None
         if line["product_id"]:
             product = by_id.get(uuid.UUID(str(line["product_id"])))
@@ -267,13 +277,14 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
     if req.customer_id is None:
         warnings.append({"code": "unknown_customer", "message": "Sender is not linked to a customer."})
     if extraction.contains_instructions:
+        kinds = ", ".join(extraction.injection) if extraction.injection else "discount, approval, credit..."
         warnings.append(
             {
                 "code": "contains_instructions",
-                "message": "Message asks for something besides an order (discount, approval, credit...). "
-                "It was not acted on; review it yourself.",
+                "message": f"Message tries to instruct the system ({kinds}). It was not acted on; review it yourself.",
             }
         )
+    warnings.extend(extraction.guard_warnings)
     total = sum((Decimal(ln["line_total"]) for ln in lines if ln["line_total"]), Decimal(0))
     if req.customer_id:
         c = session.get(Customer, req.customer_id)
@@ -292,17 +303,21 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
 
     questions = []
     for ln in lines:
-        if "ambiguous" in ln["issues"]:
+        ln_phrase = guardrails.safe_echo(ln["phrase"])
+        if "not_in_message" in ln["issues"]:
+            continue  # a reading error for staff to fix, not a question for the shop
+        if "unusual_quantity" in ln["issues"] or "quantity_not_in_message" in ln["issues"]:
+            questions.append(f"'{ln_phrase}': kitni quantity chahiye? Please confirm the quantity.")
+        elif "ambiguous" in ln["issues"]:
             opts = " / ".join(f"{k + 1}) {c['name']}" for k, c in enumerate(ln["candidates"][:4]))
-            questions.append(f"'{ln['phrase']}': konsa chahiye? Which one: {opts}")
+            questions.append(f"'{ln_phrase}': konsa chahiye? Which one: {opts}")
         elif "not_found" in ln["issues"]:
-            questions.append(f"'{ln['phrase']}': yeh item humare paas nahi mila. Please write the full product name.")
+            questions.append(f"'{ln_phrase}': yeh item humare paas nahi mila. Please write the full product name.")
         elif "missing_quantity" in ln["issues"]:
-            questions.append(f"'{ln['phrase']}': kitni quantity chahiye? How many?")
+            questions.append(f"'{ln_phrase}': kitni quantity chahiye? How many?")
         elif "unit_mismatch" in ln["issues"]:
             questions.append(
-                f"'{ln['phrase']}': {ln['quantity']} {ln['unit']} — hum {ln['sale_unit']} mein bechte hain. "
-                f"Kitne {ln['sale_unit']}?"
+                f"'{ln_phrase}': {ln['quantity']} {ln['unit']} — hum {ln['sale_unit']} mein bechte hain. Kitne {ln['sale_unit']}?"
             )
 
     blocked = any(set(ln["issues"]) & BLOCKING for ln in lines) or not lines or req.customer_id is None
@@ -312,6 +327,16 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
     req.trace = (req.trace or []) + trace
     req.status = "needs_review" if blocked or extraction.contains_instructions else "draft_ready"
     req.processed_at = utcnow()
+
+
+def _apply_guardrails(extraction: Extraction, source: str, *, from_photo: bool) -> None:
+    """Deterministic checks on whatever the model (or rule parser) returned. The model cannot set flags itself."""
+    for line in extraction.lines:
+        line.flags = []
+    extraction.injection = guardrails.detect_injection(source)
+    if extraction.injection:
+        extraction.contains_instructions = True
+    extraction.guard_warnings = guardrails.check(extraction, source, from_photo=from_photo)
 
 
 def process_request(session: Session, request_id: uuid.UUID) -> AiOrderRequest:
@@ -337,7 +362,10 @@ def process_request(session: Session, request_id: uuid.UUID) -> AiOrderRequest:
                 except Exception as exc:  # noqa: BLE001 - staff can still listen to the voice note
                     voice_trace = {"step": "speech_to_text", "provider": "groq", "error": str(exc)[:300]}
             text = att.transcript or ""  # transcript read like a text order; without one, staff listen
-    result = extract_order(text, image) if (text or image) else ExtractResult(Extraction(), "none", [])
+    source = text
+    clean = guardrails.sanitize_input(text)
+    result = extract_order(clean, image) if (clean or image) else ExtractResult(Extraction(), "none", [])
+    _apply_guardrails(result.extraction, source, from_photo=image is not None)
     req.extractor = result.extractor
     req.extraction = result.extraction.model_dump()
     req.trace = ([voice_trace] if voice_trace else []) + result.trace
@@ -466,12 +494,13 @@ def apply_customer_answer(session: Session, req: AiOrderRequest, text: str) -> s
             elif "not_found" in issues:
                 ex.lines[target["line_no"] - 1].phrase = text.strip()  # search again with the shop's wording
                 answered = True
-    elif issues & {"missing_quantity", "unit_mismatch"}:
+    elif issues & ({"missing_quantity", "unit_mismatch"} | QTY_FLAGS):
         n = _number(text)
-        if n is not None and n > 0:
+        if n is not None and 0 < n <= guardrails.MAX_QTY:
             target["quantity"] = n
             target["unit"] = None
             target["resolution"] = "customer"
+            target["quantity_confirmed"] = True
             answered = True
     if not answered:
         q = first_question(req)
@@ -721,7 +750,10 @@ def resolve_line(
             "remember": remember,
         }
     ]
-    evaluate(session, req, Extraction.model_validate(req.extraction), keep=keep)
+    ex = Extraction.model_validate(req.extraction)
+    ex.lines[line_no - 1].flags = []  # a person confirmed this line
+    req.extraction = ex.model_dump()
+    evaluate(session, req, ex, keep=keep)
     record(
         session,
         tenant_id=actor.tenant_id,

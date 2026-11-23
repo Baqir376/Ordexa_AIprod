@@ -18,7 +18,7 @@ import urllib.request
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ordexa.config import get_settings
@@ -41,6 +41,7 @@ OTP_TTL = timedelta(minutes=10)
 MAX_FAILED = 5
 LOCK_FOR = timedelta(hours=1)
 REPLY_WINDOW = timedelta(hours=24)
+MAX_MESSAGES_PER_HOUR = 30
 
 YES = {"1", "haan", "han", "ji", "jee", "yes", "y", "registered", "register", "hai", "haan ji"}
 NO = {"2", "nahi", "nahin", "no", "n", "new", "naya", "new account", "naya account"}
@@ -237,6 +238,21 @@ def handle_inbound(
 
     if contact.locked_until and contact.locked_until > utcnow():
         return []
+    # Abuse / cost guard: cap messages per number per hour (also protects the free AI quota).
+    recent = session.scalar(
+        select(func.count())
+        .select_from(WhatsappMessage)
+        .where(
+            WhatsappMessage.tenant_id == tenant.id,
+            WhatsappMessage.contact_id == contact.id,
+            WhatsappMessage.direction == "in",
+            WhatsappMessage.created_at >= utcnow() - timedelta(hours=1),
+        )
+    )
+    if recent > MAX_MESSAGES_PER_HOUR:
+        if recent == MAX_MESSAGES_PER_HOUR + 1:
+            reply("Bohat zyada messages aa gaye hain. Thori dair baad dobara bhejein. / Too many messages, please wait.")
+        return replies
     if contact.state == "blocked":
         return []
     if media and contact.state == "verified" and contact.customer_id:

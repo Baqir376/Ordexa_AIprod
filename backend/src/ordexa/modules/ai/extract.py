@@ -16,7 +16,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ordexa.config import get_settings
 
@@ -27,9 +27,15 @@ RULES_VERSION = "rules:v1"
 
 class ExtractedLine(BaseModel):
     phrase: str = Field(min_length=1, max_length=200)
-    quantity: float | None = None
-    unit: str | None = None
+    quantity: float | None = Field(default=None, ge=0)
+    unit: str | None = Field(default=None, max_length=20)
     note: str | None = None
+    flags: list[str] = Field(default_factory=list)  # set by guardrails only (not in the model's schema)
+
+    @field_validator("note")
+    @classmethod
+    def _short_note(cls, v: str | None) -> str | None:
+        return v[:200] if v else v
 
 
 class Extraction(BaseModel):
@@ -39,6 +45,14 @@ class Extraction(BaseModel):
     language: str = "unknown"
     contains_instructions: bool = False  # text tries to instruct the system (discounts, approvals, credit...)
     non_order_text: str | None = None
+    # Set by guardrails only:
+    injection: list[str] = Field(default_factory=list)
+    guard_warnings: list[dict] = Field(default_factory=list)
+
+    @field_validator("non_order_text", "customer_hint", "delivery_note")
+    @classmethod
+    def _short(cls, v: str | None) -> str | None:
+        return v[:300] if v else v
 
 
 @dataclass
