@@ -227,7 +227,10 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
                     reverse=True,
                 )
                 cands = [(s, p) for s, p in scored if s >= CANDIDATE_MIN][:5]
-                line["candidates"] = [{"product_id": str(p.id), "name": p.name, "code": p.code, "score": s} for s, p in cands]
+                line["candidates"] = [
+                    {"product_id": str(p.id), "name": p.name, "code": p.code, "generic": p.generic_name, "score": s}
+                    for s, p in cands
+                ]
                 trace.append(
                     {
                         "step": "catalogue_search",
@@ -330,8 +333,23 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
         if "unusual_quantity" in ln["issues"] or "quantity_not_in_message" in ln["issues"]:
             questions.append(f"'{ln_phrase}': kitni quantity chahiye? Please confirm the quantity.")
         elif "ambiguous" in ln["issues"]:
-            opts = "\n".join(f"{k + 1}) {c['name']}" for k, c in enumerate(ln["candidates"][:4]))
-            questions.append(f"'{ln_phrase}' mein se konsa chahiye? Number likh dein:\n{opts}")
+            cands = ln["candidates"][:4]
+            words = set(normalise_phrase(ln.get("read_as") or ln["phrase"]).split())
+            by_generic = all(
+                words & set(normalise_phrase(c.get("generic") or "").split())
+                and not words & set(normalise_phrase(c["name"]).split())
+                for c in cands
+            )
+            if by_generic:
+                # The shop named an ingredient (e.g. paracetamol), not a product: say these are brands containing it.
+                opts = "\n".join(f"{k + 1}) {c['name']} ({c['generic']})" for k, c in enumerate(cands))
+                questions.append(
+                    f"'{ln_phrase}' naam ki item hamari list mein nahi hai, lekin yeh brands is mein aate hain. "
+                    f"Konsa chahiye? Number likh dein:\n{opts}"
+                )
+            else:
+                opts = "\n".join(f"{k + 1}) {c['name']}" for k, c in enumerate(cands))
+                questions.append(f"'{ln_phrase}' mein se konsa chahiye? Number likh dein:\n{opts}")
         elif "not_found" in ln["issues"]:
             questions.append(
                 f"Maazrat, '{ln_phrase}' hamari list mein match nahi hua. Dawai ka naam English mein likh dein, "
@@ -341,7 +359,8 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
             questions.append(f"'{ln_phrase}': kitni quantity chahiye? How many?")
         elif "unit_mismatch" in ln["issues"]:
             questions.append(
-                f"'{ln_phrase}': {ln['quantity']} {ln['unit']} — hum {ln['sale_unit']} mein bechte hain. Kitne {ln['sale_unit']}?"
+                f"'{ln_phrase}': {_qty_text(ln['quantity'])} {ln['unit']} — hum {ln['sale_unit']} mein bechte hain. "
+                f"Kitne {ln['sale_unit']}?"
             )
 
     blocked = any(set(ln["issues"]) & BLOCKING for ln in lines) or not lines or req.customer_id is None
@@ -406,6 +425,11 @@ def process_request(session: Session, request_id: uuid.UUID) -> AiOrderRequest:
     if req.source == "whatsapp":
         _notify_customer(session, req)
     return req
+
+
+def _qty_text(v) -> str:
+    d = Decimal(str(v))
+    return f"{d:,.0f}" if d == d.to_integral_value() else f"{d.normalize()}"
 
 
 def first_question(req: AiOrderRequest) -> str | None:
@@ -515,9 +539,15 @@ def apply_customer_answer(session: Session, req: AiOrderRequest, text: str) -> s
                 target["product_id"] = str(scored[0][1].id)
                 target["resolution"] = "customer"
                 answered = True
-            elif "not_found" in issues:
-                ex.lines[target["line_no"] - 1].phrase = text.strip()  # search again with the shop's wording
-                answered = True
+            else:
+                # Not one of the options: the shop named another product ("paracetamol"). Search the whole catalogue
+                # with its wording; for a "which one?" question only if that wording matches something we sell.
+                found = RuleExtractor().extract(text).extraction.lines
+                wording = found[0].phrase if len(found) == 1 else text.strip()
+                if "not_found" in issues or any(score_product(wording, p) >= CANDIDATE_MIN for p in products.values()):
+                    ex.lines[target["line_no"] - 1].phrase = wording
+                    ex.lines[target["line_no"] - 1].search_name = None
+                    answered = True
     elif issues & ({"missing_quantity", "unit_mismatch"} | QTY_FLAGS):
         n = _number(text)
         if n is not None and 0 < n <= guardrails.MAX_QTY:

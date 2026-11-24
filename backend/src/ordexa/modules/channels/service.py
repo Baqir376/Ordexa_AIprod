@@ -23,6 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ordexa.config import get_settings
+from ordexa.modules.ai import conversation
 from ordexa.modules.ai import service as ai
 from ordexa.modules.ai.models import AiAttachment
 from ordexa.modules.audit.models import record
@@ -390,9 +391,12 @@ def handle_inbound(
                 f"{name}: order bhejne ke liye items aur quantity likhein, e.g. '10 box panadol, 5 patta brufen'.\n"
                 f"Balance dekhne ke liye 'balance' likhein."
             )
-        elif (open_req := ai.open_clarification(session, tenant.id, to)) and ai.looks_like_answer(open_req, t):
+        elif (open_req := conversation.open_order(session, tenant.id, to)) and (
+            answer := conversation.handle_reply(session, open_req, t)
+        ) is not None:
+            # An answer, a change ("balkay 20 box"), an extra item ("... bhi") or a cancel for the unfinished order.
             inbound.ai_order_id = open_req.id
-            reply(ai.apply_customer_answer(session, open_req, t))
+            reply(answer)
         else:
             req, created = ai.submit(
                 session,
