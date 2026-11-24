@@ -281,3 +281,138 @@ def post_invoice(
         data={"number": inv.number, "total": str(total), "source": source, "flags": [f["code"] for f in flags]},
     )
     return PostResult(str(invoice.id), invoice.number, "accepted", flags, total=str(total))
+
+
+# ------------------------------------------------------------------ adding items to today's bill
+
+AMENDABLE_SOURCES = ("whatsapp_ai", "ai_manual")  # server-numbered W- bills; PC bills are printed at the counter
+
+
+def amend_blocker(session: Session, invoice: Invoice) -> str | None:
+    """Why this bill cannot take more items (None = it can): same business day, W-series, no returns against it."""
+    from ordexa.modules.finance.models import CreditNote
+    from ordexa.modules.tenants.timeutil import business_today
+
+    if invoice.status != "posted":
+        return f"bill {invoice.number} is {invoice.status}"
+    if invoice.source not in AMENDABLE_SOURCES:
+        return f"bill {invoice.number} was made on a PC; only WhatsApp/AI bills can be added to"
+    if local_date(session, invoice.tenant_id, invoice.issued_at) != business_today(session, invoice.tenant_id):
+        return f"bill {invoice.number} is from an earlier day"
+    if session.query(CreditNote.id).filter(CreditNote.invoice_id == invoice.id).first():
+        return f"bill {invoice.number} already has a return / credit note"
+    return None
+
+
+def add_lines(session: Session, principal: Principal, invoice: Invoice, new_lines: list[LineIn], *, note: str) -> PostResult:
+    """Add items to a bill made earlier today: the same bill number, total and ledger grow, stock goes out for the new
+    lines only, and the change is recorded on the bill and in the audit log."""
+    principal.require("invoice.create")
+    why = amend_blocker(session, invoice)
+    if why:
+        return PostResult(str(invoice.id), invoice.number, "rejected", reason=why)
+    if not new_lines:
+        return PostResult(str(invoice.id), invoice.number, "rejected", reason="nothing to add")
+    start = max((ln.line_no for ln in invoice.lines), default=0)
+    added: list[InvoiceLine] = []
+    flags: list[dict] = []
+    add_total = Decimal(0)
+    for k, ln in enumerate(new_lines, start=1):
+        product = session.get(Product, ln.product_id)
+        if not product or product.tenant_id != principal.tenant_id:
+            return PostResult(str(invoice.id), invoice.number, "rejected", reason="product not found")
+        batch = session.get(Batch, ln.batch_id) if ln.batch_id else None
+        if qty(ln.quantity) <= 0 or money(ln.unit_price) < 0:
+            return PostResult(str(invoice.id), invoice.number, "rejected", reason="invalid quantity or price")
+        total = line_total(ln.quantity, ln.unit_price, ln.discount)
+        add_total += total
+        added.append(
+            InvoiceLine(
+                line_no=start + k,
+                product_id=product.id,
+                batch_id=batch.id if batch else None,
+                product_name=product.name,
+                batch_no=batch.batch_no if batch else None,
+                quantity=qty(ln.quantity),
+                bonus_quantity=qty(ln.bonus_quantity),
+                unit=product.sale_unit,
+                unit_price=money(ln.unit_price),
+                discount=money(ln.discount),
+                line_total=total,
+            )
+        )
+    invoice.lines.extend(added)
+    invoice.subtotal = money(invoice.subtotal + add_total)
+    invoice.total = money(invoice.total + add_total)
+    session.flush()
+    for ln in added:
+        inventory.post(
+            session,
+            tenant_id=principal.tenant_id,
+            warehouse_id=invoice.warehouse_id,
+            product_id=ln.product_id,
+            batch_id=ln.batch_id,
+            qty_delta=-(ln.quantity + ln.bonus_quantity),
+            kind="sale",
+            source_type="invoice",
+            source_id=invoice.id,
+            source_line=ln.line_no,
+            created_by=principal.user_id,
+        )
+    session.flush()
+    for ln in added:
+        left = inventory.on_hand(
+            session,
+            tenant_id=principal.tenant_id,
+            warehouse_id=invoice.warehouse_id,
+            product_id=ln.product_id,
+            batch_id=ln.batch_id,
+        )
+        if left < 0:
+            flags.append({"code": "oversold", "line_no": ln.line_no, "product": ln.product_name, "on_hand_after": str(left)})
+    amendment_id = uuid.uuid4()
+    if invoice.customer_id:
+        post_ledger(
+            session,
+            tenant_id=principal.tenant_id,
+            party_type="customer",
+            party_id=invoice.customer_id,
+            amount=add_total,
+            kind="invoice_addition",
+            source_id=amendment_id,
+            reference=f"{invoice.number} +",
+            entry_date=local_date(session, principal.tenant_id, invoice.issued_at),
+            memo=note[:200],
+        )
+        customer = session.get(Customer, invoice.customer_id)
+        if customer and customer.credit_limit is not None:
+            outstanding = customer_outstanding(session, principal.tenant_id, customer.id)
+            if outstanding > customer.credit_limit:
+                flags.append(
+                    {"code": "credit_exceeded", "outstanding": str(outstanding), "credit_limit": str(customer.credit_limit)}
+                )
+    invoice.flags = (
+        (invoice.flags or [])
+        + flags
+        + [
+            {
+                "code": "items_added",
+                "amendment_id": str(amendment_id),
+                "lines": [ln.line_no for ln in added],
+                "amount": str(money(add_total)),
+                "note": note[:200],
+                "by": principal.username,
+                "at": datetime.now().astimezone().isoformat(),
+            }
+        ]
+    )
+    record(
+        session,
+        tenant_id=principal.tenant_id,
+        actor_user_id=principal.user_id,
+        action="invoice.items_added",
+        entity_type="invoice",
+        entity_id=invoice.id,
+        data={"number": invoice.number, "added": str(money(add_total)), "total": str(invoice.total), "note": note[:200]},
+    )
+    return PostResult(str(invoice.id), invoice.number, "accepted", flags, total=str(invoice.total))

@@ -67,7 +67,10 @@ def invoice_pdf(session: Session, invoice: Invoice) -> bytes:
     pdf.set_font("Helvetica", "B", 13)
     pdf.cell(w / 2, 7, "SALES INVOICE")
     pdf.set_font("Helvetica", "", 10)
-    pdf.cell(w / 2, 7, _t(f"Bill no: {invoice.number}"), align="R", new_x="LMARGIN", new_y="NEXT")
+    updated = any(f.get("code") == "items_added" for f in (invoice.flags or []))
+    pdf.cell(
+        w / 2, 7, _t(f"Bill no: {invoice.number}" + (" (updated)" if updated else "")), align="R", new_x="LMARGIN", new_y="NEXT"
+    )
     when = local_date(session, invoice.tenant_id, invoice.issued_at)
     pdf.cell(w / 2, 5, _t(f"Customer: {invoice.customer_name}"))
     pdf.cell(w / 2, 5, _t(f"Date: {when:%d-%m-%Y}"), align="R", new_x="LMARGIN", new_y="NEXT")

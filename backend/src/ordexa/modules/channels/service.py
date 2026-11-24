@@ -32,6 +32,8 @@ from ordexa.modules.customers.models import Customer
 from ordexa.modules.identity.service import Principal
 from ordexa.modules.jobs.models import Job
 from ordexa.modules.jobs.service import enqueue
+from ordexa.modules.sales import service as sales
+from ordexa.modules.sales.models import Invoice
 from ordexa.modules.tenants.models import Tenant
 from ordexa.shared.crypto import decrypt
 from ordexa.shared.db import lock_master_data
@@ -410,7 +412,7 @@ def handle_inbound(
                 sender=to,
             )
             inbound.ai_order_id = req.id
-            if created and conversation.ADD.search(t):
+            if created and (conversation.ADD.search(t) or conversation.SAME_BILL.search(t)):
                 prev = session.scalar(
                     select(AiOrderRequest)
                     .where(
@@ -422,7 +424,13 @@ def handle_inbound(
                     .order_by(AiOrderRequest.received_at.desc())
                     .limit(1)
                 )
-                if (
+                bill = session.get(Invoice, prev.invoice_id) if prev is not None and prev.invoice_id else None
+                if bill is not None and sales.amend_blocker(session, bill) is None:
+                    # Same day, bill not returned: these items go into that bill when staff approve.
+                    req.trace = (req.trace or []) + [
+                        {"step": "add_to_bill", "invoice_id": str(bill.id), "number": bill.number, "order": prev.number}
+                    ]
+                elif (
                     prev is not None
                     and prev.status == "approved"
                     and prev.reviewed_at

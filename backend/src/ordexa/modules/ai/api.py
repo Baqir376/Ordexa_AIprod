@@ -13,6 +13,7 @@ from ordexa.modules.ai.models import AiAttachment, AiOrderRequest, ProductAlias
 from ordexa.modules.catalogue.models import Product
 from ordexa.modules.customers.models import Customer
 from ordexa.modules.identity.service import Principal, current_principal, requires
+from ordexa.modules.sales import service as sales_service
 from ordexa.modules.sales.models import Invoice
 from ordexa.shared.db import get_session
 
@@ -39,6 +40,7 @@ class AddLineIn(BaseModel):
 
 class ApproveIn(BaseModel):
     acknowledge_warnings: bool = False
+    new_bill: bool = False  # the shop asked to add to today's bill, but staff want a separate bill
 
 
 class RejectIn(BaseModel):
@@ -82,6 +84,16 @@ def shop_updates(r: AiOrderRequest) -> list[dict]:
     return out
 
 
+def _add_to_bill(session: Session, r: AiOrderRequest) -> dict | None:
+    t = service.add_to_bill_target(r)
+    if not t or r.status in ("approved", "rejected", "closed"):
+        return None
+    bill = session.get(Invoice, uuid.UUID(t["invoice_id"]))
+    blocker = sales_service.amend_blocker(session, bill) if bill else "bill not found"
+    return {"invoice_id": t["invoice_id"], "number": t["number"], "order": t.get("order"), "possible": blocker is None,
+            "reason": blocker}  # fmt: skip
+
+
 def out(session: Session, r: AiOrderRequest, full: bool = True) -> dict:
     c = session.get(Customer, r.customer_id) if r.customer_id else None
     inv = session.get(Invoice, r.invoice_id) if r.invoice_id else None
@@ -103,6 +115,7 @@ def out(session: Session, r: AiOrderRequest, full: bool = True) -> dict:
         "invoice": {"id": str(inv.id), "number": inv.number, "total": str(inv.total)} if inv else None,
         "review_note": r.review_note,
         "shop_updates": shop_updates(r),
+        "add_to_bill": _add_to_bill(session, r),
     }
     if full:
         d.update(
@@ -211,7 +224,7 @@ def link_customer(
 def approve(
     request_id: uuid.UUID, body: ApproveIn, p: Principal = Depends(current_principal), session: Session = Depends(get_session)
 ):
-    req, inv = service.approve(session, p, request_id, acknowledge_warnings=body.acknowledge_warnings)
+    req, inv = service.approve(session, p, request_id, acknowledge_warnings=body.acknowledge_warnings, new_bill=body.new_bill)
     session.commit()
     return {**out(session, req), "invoice_flags": inv.flags}
 

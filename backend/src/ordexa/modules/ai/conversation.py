@@ -62,6 +62,7 @@ REMOVE = re.compile(
 )
 # "calpol ke 7 kar dein", "20 box kr do": setting a quantity on an item already ordered.
 SET_QTY = re.compile(r"\d+\s*(?:[^\W\d_]+\s+)?(?:kar|kr)\s*(?:do|dein|den|dain|dijiye|dijye|dena)(?![\w])", re.I)
+SAME_BILL = re.compile(_W.format(r"isi bill|usi bill|same bill|wohi bill|wahi bill|pichle bill|bill mein add|bill me add"), re.I)
 ADD = re.compile(_W.format(r"bhi|add|also|is ke sath|iske sath|saath mein|sath mein"), re.I)
 WHOLE_ORDER = re.compile(_W.format(r"order|sab|sara|saara|poora|pura|all|everything|sab kuch"), re.I)
 POINTER = re.compile(_W.format(r"is ko|isko|isay|isse|is ka|iska|ye wala|yeh wala|ye|yeh|this|that|woh|wo"), re.I)

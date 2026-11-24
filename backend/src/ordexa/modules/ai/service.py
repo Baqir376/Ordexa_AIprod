@@ -40,6 +40,7 @@ from ordexa.modules.identity.service import Principal
 from ordexa.modules.inventory.models import InventoryTransaction
 from ordexa.modules.jobs.service import enqueue
 from ordexa.modules.sales import service as sales
+from ordexa.modules.sales.models import Invoice
 from ordexa.modules.tenants.models import Warehouse
 from ordexa.modules.tenants.timeutil import business_today
 from ordexa.shared.errors import ErrorCode, OrdexaError
@@ -473,7 +474,7 @@ def process_request(session: Session, request_id: uuid.UUID, *, defer_on_rate_li
     _merge_duplicates(result.extraction)
     req.extractor = result.extractor
     req.extraction = result.extraction.model_dump()
-    carried = [t for t in (req.trace or []) if t.get("step") == "after_billed_order"]  # set when the message came in
+    carried = [t for t in (req.trace or []) if t.get("step") in ("after_billed_order", "add_to_bill")]  # set on arrival
     req.trace = carried + ([voice_trace] if voice_trace else []) + result.trace
     req.error = None
     evaluate(session, req, result.extraction)
@@ -550,6 +551,8 @@ def respond(session: Session, req: AiOrderRequest, ex: Extraction) -> None:
     for t in req.trace or []:
         if t.get("step") == "after_billed_order":
             prefix = f"Order {t['number']} ka bill ban chuka tha, is liye yeh naya order hai.\n"
+        if t.get("step") == "add_to_bill":
+            prefix = f"Yeh items aap ke aaj ke bill {t['number']} mein add kar diye jayenge.\n"
     if req.customer_id is None:
         body = replies.order_ack(req, asks_price=False) if req.lines else None
     elif kind == "price_question" and not real:
@@ -1122,8 +1125,13 @@ def link_customer(session: Session, actor: Principal, request_id: uuid.UUID, cus
     return req
 
 
+def add_to_bill_target(req: AiOrderRequest) -> dict | None:
+    """The bill made earlier today that the shop asked to add these items to (set when the message arrived)."""
+    return next((t for t in reversed(req.trace or []) if t.get("step") == "add_to_bill"), None)
+
+
 def approve(
-    session: Session, actor: Principal, request_id: uuid.UUID, *, acknowledge_warnings: bool = False
+    session: Session, actor: Principal, request_id: uuid.UUID, *, acknowledge_warnings: bool = False, new_bill: bool = False
 ) -> tuple[AiOrderRequest, sales.PostResult]:
     """Human approval: the draft becomes a posted invoice (W-series), batches picked earliest-expiry first."""
     actor.require("sales_order.approve")
@@ -1171,6 +1179,13 @@ def approve(
             inv_lines.append(
                 sales.LineIn(line_no=n, product_id=product.id, batch_id=b.id if b else None, quantity=q, unit_price=price)
             )
+    target = None if new_bill else add_to_bill_target(req)
+    bill = session.get(Invoice, uuid.UUID(target["invoice_id"])) if target else None
+    if bill is not None and bill.customer_id == req.customer_id and sales.amend_blocker(session, bill) is None:
+        return _approve_into_bill(session, actor, req, bill, inv_lines)
+    if target:  # the bill can no longer take items (next day, returned...): a separate bill, and say why
+        why = sales.amend_blocker(session, bill) if bill is not None else "bill not found"
+        req.trace = (req.trace or []) + [{"step": "add_to_bill_skipped", "reason": why or "staff chose a new bill"}]
     inv_id = uuid.uuid4()
     result = sales.post_invoice(
         session,
@@ -1220,6 +1235,53 @@ def approve(
             },
         )
     return req, result
+
+
+def _approve_into_bill(
+    session: Session, actor: Principal, req: AiOrderRequest, bill: Invoice, lines: list[sales.LineIn]
+) -> tuple[AiOrderRequest, sales.PostResult]:
+    """Approve by adding the items to the shop's bill from earlier today (same number, updated total and PDF)."""
+    result = sales.add_lines(session, actor, bill, lines, note=f"added from order {req.number}")
+    if result.status != "accepted":
+        raise OrdexaError(ErrorCode.CONFLICT, f"could not add to bill {bill.number}: {result.reason}")
+    added = sum((ln.line_total for ln in bill.lines if ln.line_no in _added_line_nos(bill)), Decimal(0))
+    req.invoice_id = bill.id
+    req.status = "approved"
+    req.reviewed_by = actor.user_id
+    req.reviewed_at = utcnow()
+    req.trace = (req.trace or []) + [
+        {"step": "approved", "by": actor.username, "invoice": bill.number, "added_to_bill": True, "added": str(added)}
+    ]
+    record(
+        session,
+        tenant_id=req.tenant_id,
+        actor_user_id=actor.user_id,
+        action="ai_order.approved",
+        entity_type="ai_order",
+        entity_id=req.id,
+        data={"number": req.number, "invoice": bill.number, "added_to_bill": True, "total": result.total},
+    )
+    if req.source == "whatsapp" and req.sender:
+        enqueue(
+            session,
+            kind="whatsapp.send",
+            queue="outbox",
+            tenant_id=req.tenant_id,
+            idempotency_key=f"wa-approved:{req.id}",
+            payload={
+                "to": req.sender,
+                "ref": bill.number,
+                "body": f"Order {req.number} ke items aap ke bill {bill.number} mein add ho gaye. "
+                f"Updated bill {bill.number}: Rs {bill.total}. Updated bill attached hai. Shukriya!",
+                "document": {"kind": "invoice", "invoice_id": str(bill.id), "filename": f"Bill-{bill.number}-updated.pdf"},
+            },
+        )
+    return req, result
+
+
+def _added_line_nos(bill: Invoice) -> set[int]:
+    last = next((f for f in reversed(bill.flags or []) if f.get("code") == "items_added"), None)
+    return set(last["lines"]) if last else set()
 
 
 def reject(session: Session, actor: Principal, request_id: uuid.UUID, reason: str) -> AiOrderRequest:

@@ -47,6 +47,7 @@ interface Order {
   invoice: { id: string; number: string; total: string } | null
   review_note: string | null
   shop_updates?: ShopUpdate[]
+  add_to_bill?: { invoice_id: string; number: string; order: string | null; possible: boolean; reason: string | null } | null
   lines?: Line[]
   questions?: string[]
   trace?: Record<string, unknown>[]
@@ -182,10 +183,10 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
     }
     return r
   }
-  async function approve() {
+  async function approve(newBill = false) {
     const soft = order!.warnings.some((w) => ['credit_review', 'customer_inactive'].includes(w.code)) || order!.lines!.some((l) => l.issues.includes('insufficient_stock'))
     if (soft && !window.confirm('This order has warnings (credit or stock). Approve and bill anyway?')) return
-    await act('/approve', { acknowledge_warnings: soft })
+    await act('/approve', { acknowledge_warnings: soft, new_bill: newBill })
   }
 
   if (!order) return <div className="muted pad">Loading…</div>
@@ -299,13 +300,23 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
       {order.status === 'closed' && order.review_note && <div className="alert ok">{order.review_note}</div>}
       {order.invoice && <div className="alert ok">Billed as {order.invoice.number} · {rs(order.invoice.total)}</div>}
       {order.status === 'rejected' && order.review_note && <div className="alert warn">{order.review_note.startsWith('Cancelled by the shop') ? order.review_note : `Rejected: ${order.review_note}`}</div>}
+      {editable && order.add_to_bill && (
+        <div className={`alert ${order.add_to_bill.possible ? 'ok' : 'warn'}`}>
+          {order.add_to_bill.possible
+            ? `The shop asked to add these items to today's bill ${order.add_to_bill.number}. Approving adds them to that bill (same number) and sends the shop the updated bill.`
+            : `The shop asked to add these to bill ${order.add_to_bill.number}, but ${order.add_to_bill.reason}. Approving makes a separate bill.`}
+        </div>
+      )}
       {editable && (
         <div className="approve-bar">
           <span>Total <b>{rs(total.toFixed(2))}</b></span>
           <button className="btn danger" onClick={() => setReject('')}>Reject</button>
+          {can(perms, 'sales_order.approve') && order.add_to_bill?.possible && (
+            <button className="btn" disabled={busy || order.status !== 'draft_ready'} onClick={() => void approve(true)}>Make a separate bill</button>
+          )}
           {can(perms, 'sales_order.approve') ? (
             <button className="btn primary big" disabled={busy || order.status !== 'draft_ready'} onClick={() => void approve()} title={order.status !== 'draft_ready' ? 'Fix the red lines first' : 'Create the bill'}>
-              Approve & create bill
+              {order.add_to_bill?.possible ? `Add to bill ${order.add_to_bill.number}` : 'Approve & create bill'}
             </button>
           ) : (
             <span className="muted small">An approver must create the bill.</span>
