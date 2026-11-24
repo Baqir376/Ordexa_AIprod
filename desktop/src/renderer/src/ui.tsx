@@ -1,6 +1,6 @@
 // Small shared building blocks for the back-office screens.
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 
 import { formatRs, toPaisa } from '../../core/money'
 import { ordexa } from './bridge'
@@ -49,6 +49,40 @@ export function useApi<T>(path: string | null, deps: unknown[] = []) {
     void load()
   }, [load])
   return { data, error, loading, reload: load }
+}
+
+/** A "slider" that glides to the active child of a container (tabs, sidebar): put <span className="slider" /> as the
+ *  container's first child and give the active child the class "active". Follows resizes and scroll content. */
+export function useSlider<T extends HTMLElement>(dep: unknown) {
+  const ref = useRef<T>(null)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const place = () => {
+      const ind = el.querySelector<HTMLElement>(':scope > .slider')
+      const a = el.querySelector<HTMLElement>('.active')
+      if (!ind) return
+      if (!a) {
+        ind.style.opacity = '0'
+        return
+      }
+      const box = el.getBoundingClientRect()
+      const r = a.getBoundingClientRect()
+      ind.style.opacity = '1'
+      ind.style.width = `${r.width}px`
+      ind.style.height = `${r.height}px`
+      ind.style.transform = `translate(${r.left - box.left + el.scrollLeft}px, ${r.top - box.top + el.scrollTop}px)`
+    }
+    place()
+    const ro = new ResizeObserver(place)
+    ro.observe(el)
+    const t = setTimeout(place, 60) // after fonts / badges settle
+    return () => {
+      ro.disconnect()
+      clearTimeout(t)
+    }
+  }, [dep])
+  return ref
 }
 
 export interface Column<T> {
@@ -196,7 +230,7 @@ export function Field({ label, children }: { label: string; children: ReactNode 
 
 export function Stat({ label, value, tone }: { label: string; value: ReactNode; tone?: 'ok' | 'warn' | 'bad' }) {
   return (
-    <div className={`stat card ${tone ?? ''}`}>
+    <div className={`stat card tilt ${tone ?? ''}`}>
       <div className="stat-label">{label}</div>
       <div className="stat-value">{value}</div>
     </div>

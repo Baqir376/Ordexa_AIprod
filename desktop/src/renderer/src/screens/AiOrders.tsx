@@ -7,7 +7,7 @@ import type { AppState, CustomerHit, ProductHit } from '../../../core/types'
 import { ordexa } from '../bridge'
 import { Icon } from '../icons'
 import { ChatThread, Chats, ago, initials } from './Chats'
-import { ErrorBox, Modal, can, rs, uid, useAction, useApi } from '../ui'
+import { ErrorBox, Modal, can, rs, uid, useAction, useApi, useSlider } from '../ui'
 
 interface Line {
   line_no: number
@@ -139,6 +139,8 @@ export function AiOrders({ state }: { state: AppState }) {
   const { busy, error: delError, run } = useAction()
   const canDelete = can(perms, 'sales_order.approve')
   const reload = () => { void list.reload(); void counts.reload() }
+  const switchRef = useSlider<HTMLDivElement>(view)
+  const foldersRef = useSlider<HTMLDivElement>(`${filter}:${view}:${counts.data?.open ?? ''}`)
   const [opened, setOpened] = useState<Set<string>>(() => loadOpened())
   const isNew = (o: Order) => ['ready', 'fix', 'message'].includes(o.stage ?? o.status) && !opened.has(o.id)
   const open = (id: string) => {
@@ -226,7 +228,8 @@ export function AiOrders({ state }: { state: AppState }) {
           <h1>WhatsApp</h1>
           <div className="page-sub">Orders read by AI and approved by you, and every chat with your shops.</div>
         </div>
-        <div className="view-switch" role="tablist">
+        <div className="view-switch" role="tablist" ref={switchRef}>
+          <span className="slider" aria-hidden="true" />
           <button role="tab" aria-selected={view === 'orders'} className={view === 'orders' ? 'active' : ''} onClick={() => setView('orders')}>
             <Icon name="receipt" size={16} /> Orders
           </button>
@@ -249,7 +252,7 @@ export function AiOrders({ state }: { state: AppState }) {
             ['waiting_shop', 'Waiting for shop', 'clock', 'The bot asked the shop a question', 'open'],
             ['messages', 'Messages', 'message', 'Complaints and questions to answer', 'messages'],
           ] as const).map(([k, label, icon, hint, tab]) => (
-            <button key={k} className={`kpi kpi-${k}`} onClick={() => setFilter(tab)}>
+            <button key={k} className={`kpi kpi-${k} tilt`} onClick={() => setFilter(tab)}>
               <span className="kpi-ico"><Icon name={icon} size={18} /></span>
               <span className="kpi-body">
                 <span className="kpi-label">{label}</span>
@@ -262,7 +265,8 @@ export function AiOrders({ state }: { state: AppState }) {
         <div className="desk">
           <div className="desk-list">
             <div className="desk-list-head">
-              <div className="folders" role="tablist">
+              <div className="folders" role="tablist" ref={foldersRef}>
+                <span className="slider" aria-hidden="true" />
                 {FILTERS.map((f) => {
                   const n = counts.data?.[f.key]
                   const hot = (f.key === 'open' && (counts.data?.ready ?? 0) + (counts.data?.fix ?? 0) > 0) || (f.key === 'messages' && (n ?? 0) > 0)

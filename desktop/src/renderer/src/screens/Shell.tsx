@@ -3,7 +3,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import type { AppState } from '../../../core/types'
 import { ordexa } from '../bridge'
 import { Icon } from '../icons'
-import { can } from '../ui'
+import { can, useSlider } from '../ui'
 import { Staff, Settings } from './Admin'
 import { AiOrders, deskSeenAt } from './AiOrders'
 import { Billing } from './Billing'
@@ -112,6 +112,7 @@ export function Shell({ state, refresh }: { state: AppState; refresh: () => void
   else if (tab === 'settings') body = <Settings state={state} />
 
   const groups = [...new Set(visible.map((n) => n.group))]
+  const navRef = useSlider<HTMLElement>(tab)
   const todo = notice?.new?.total ?? 0
   return (
     <div className="shell">
@@ -131,13 +132,15 @@ export function Shell({ state, refresh }: { state: AppState; refresh: () => void
       </header>
       {state.sync.message && state.sync.state !== 'idle' && <div className={`banner ${state.sync.state}`}>{state.sync.message}</div>}
       <div className="body">
-        <nav className="sidebar" aria-label="Modules">
+        <nav className="sidebar" aria-label="Modules" ref={navRef}>
+          <span className="slider" aria-hidden="true" />
+          <div className="sidebar-glow" aria-hidden="true" />
           {groups.map((g) => (
             <div key={g} className="nav-group">
               <div className="nav-title">{g}</div>
               {visible.filter((n) => n.group === g).map((n) => (
                 <button key={n.key} className={tab === n.key ? 'active' : ''} onClick={() => go(n.key)}>
-                  <Icon name={n.key} />
+                  <span className="nav-ico"><Icon name={n.key} /></span>
                   <span className="nav-label">{n.label}</span>
                   {n.key === 'ai' && todo > 0 && <span className="nav-badge" title="Orders and messages waiting for you">{todo}</span>}
                   {n.key_hint && <kbd>{n.key_hint}</kbd>}
@@ -146,7 +149,9 @@ export function Shell({ state, refresh }: { state: AppState; refresh: () => void
             </div>
           ))}
         </nav>
-        <main className="content">{body}</main>
+        <main className="content">
+          <div key={tab} className="page-enter">{body}</div>
+        </main>
       </div>
       <footer className="statusbar">
         <span>
