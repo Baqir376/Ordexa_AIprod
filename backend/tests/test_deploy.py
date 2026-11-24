@@ -100,3 +100,9 @@ def test_ai_job_failure_is_visible_and_recoverable(make_biz, monkeypatch):
     assert failed["status"] == "failed" and "boom" in failed["error"]
     monkeypatch.setattr(ai, "extract_order", real)
     assert biz.post(f"/api/v1/ai/orders/{o['id']}/reprocess").json()["status"] == "draft_ready"
+
+
+def test_public_privacy_and_data_deletion_pages(client):
+    for path in ("/legal/privacy", "/legal/data-deletion"):
+        r = client.get(path)
+        assert r.status_code == 200 and "text/html" in r.headers["content-type"] and "Ordexa" in r.text

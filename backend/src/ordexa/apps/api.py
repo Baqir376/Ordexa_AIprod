@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 import ordexa.models  # noqa: F401  (register every table so foreign keys resolve)
+from ordexa.apps.legal import router as legal
 from ordexa.apps.webhook import router as webhooks
 from ordexa.config import get_settings
 from ordexa.modules.ai.api import router as ai
@@ -83,6 +84,7 @@ def create_app() -> FastAPI:
         channels,
         backup,
         webhooks,
+        legal,
     ):
         app.include_router(router)
 
