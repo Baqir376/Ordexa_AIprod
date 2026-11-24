@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 
 import type { AppState, CustomerHit, ProductHit } from '../../../core/types'
 import { ordexa } from '../bridge'
+import { ChatThread, Chats, ago, initials } from './Chats'
 import { ErrorBox, Modal, can, rs, uid, useAction, useApi } from '../ui'
 
 interface Line {
@@ -90,49 +91,41 @@ const ISSUE_TEXT: Record<string, string> = {
   inactive_product: 'Product inactive',
 }
 
-type Filter = 'open' | 'approved' | 'rejected' | 'closed'
+type Filter = 'open' | 'messages' | 'approved' | 'rejected' | 'closed'
 const FILTERS: { key: Filter; label: string }[] = [
   { key: 'open', label: 'Open' },
+  { key: 'messages', label: 'Messages' },
   { key: 'approved', label: 'Approved' },
   { key: 'rejected', label: 'Rejected' },
   { key: 'closed', label: 'By bot' },
 ]
 // Open orders are grouped by what someone has to do next.
 const GROUPS: { title: string; statuses: string[] }[] = [
-  { title: 'Needs your attention', statuses: ['needs_review', 'message', 'failed'] },
+  { title: 'Needs your attention', statuses: ['needs_review', 'failed'] },
   { title: 'Ready to approve', statuses: ['draft_ready'] },
   { title: 'Being read by AI', statuses: ['received', 'processing'] },
 ]
 
-function initials(name: string): string {
-  const words = name.replace(/[^\p{L}\p{N} ]/gu, ' ').trim().split(/\s+/).filter(Boolean)
-  if (!words.length) return '?'
-  return (words[0][0] + (words[1]?.[0] ?? '')).toUpperCase()
-}
-
-function ago(iso: string): string {
-  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60_000))
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins} min ago`
-  const h = Math.round(mins / 60)
-  if (h < 24) return `${h} h ago`
-  return new Date(iso).toLocaleDateString('en-PK', { day: 'numeric', month: 'short' })
-}
-
 export function AiOrders({ state }: { state: AppState }) {
   const perms = state.user?.permissions
+  const [view, setView] = useState<'orders' | 'chats'>('orders')
   const [filter, setFilter] = useState<Filter>('open')
   const [q, setQ] = useState('')
   const list = useApi<Order[]>(`/api/v1/ai/orders?status=${filter}`, [filter])
   const counts = useApi<Record<string, number>>('/api/v1/ai/orders/counts')
   const [openId, setOpenId] = useState<string | null>(null)
   const [newOrder, setNewOrder] = useState(false)
+  const [selecting, setSelecting] = useState(false)
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const { busy, error: delError, run } = useAction()
+  const canDelete = can(perms, 'sales_order.approve')
   const reload = () => { void list.reload(); void counts.reload() }
 
   useEffect(() => {
     const t = setInterval(() => { void list.reload(); void counts.reload() }, 10_000) // new WhatsApp orders appear without refreshing
     return () => clearInterval(t)
   }, [list.reload, counts.reload])
+  useEffect(() => { setPicked(new Set()); setSelecting(false) }, [filter])
 
   const needle = q.trim().toLowerCase()
   const rows = (list.data ?? []).filter((o) =>
@@ -140,13 +133,43 @@ export function AiOrders({ state }: { state: AppState }) {
   const groups = filter === 'open'
     ? GROUPS.map((g) => ({ ...g, rows: rows.filter((o) => g.statuses.includes(o.status)) })).filter((g) => g.rows.length)
     : [{ title: '', statuses: [], rows }]
+  const deletable = rows.filter((o) => o.status !== 'approved')
+
+  function toggle(id: string) {
+    setPicked((cur) => {
+      const next = new Set(cur)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  async function deletePicked() {
+    if (!picked.size) return
+    if (!window.confirm(`Delete ${picked.size} item(s) from the desk? Use this for spam, test messages and chats that were never orders. Billed orders are never deleted.`)) return
+    const ok = await run(() => ordexa().request('POST', '/api/v1/ai/orders/delete', { ids: [...picked] }))
+    if (ok) {
+      if (openId && picked.has(openId)) setOpenId(null)
+      setPicked(new Set())
+      setSelecting(false)
+      reload()
+    }
+  }
 
   const card = (o: Order) => {
     const who = o.customer?.name ?? o.sender ?? 'Unknown sender'
     const badge = shopBadge(o)
+    const sel = picked.has(o.id)
     return (
-      <button key={o.id} className={`order-card st-${o.status} ${openId === o.id ? 'active' : ''}`} onClick={() => setOpenId(o.id)}>
-        <span className="avatar">{initials(who)}</span>
+      <button
+        key={o.id}
+        className={`order-card st-${o.status} ${openId === o.id && !selecting ? 'active' : ''} ${sel ? 'picked' : ''}`}
+        onClick={() => (selecting ? o.status !== 'approved' && toggle(o.id) : setOpenId(o.id))}
+      >
+        {selecting ? (
+          <span className={`avatar check ${sel ? 'on' : ''}`}>{sel ? '✓' : ''}</span>
+        ) : (
+          <span className={`avatar ${o.customer ? '' : 'stranger'}`}>{initials(who)}</span>
+        )}
         <div className="oc-top">
           <b title={who}>{who}</b>
           <span className={`tag st-${o.status}`}>{STATUS_LABEL[o.status] ?? o.status}</span>
@@ -167,63 +190,129 @@ export function AiOrders({ state }: { state: AppState }) {
   }
 
   return (
-    <div className="desk">
-      <div className="desk-list">
-        <div className="desk-list-head">
-          <div className="page-head">
-            <div>
-              <h1>WhatsApp orders</h1>
-              <div className="page-sub">Read by AI, approved by you.</div>
-            </div>
-            {can(perms, 'sales_order.create') && <button className="btn primary small" onClick={() => setNewOrder(true)}>+ Paste order</button>}
-          </div>
-          <div className="subtabs" role="tablist">
-            {FILTERS.map((f) => {
-              const n = counts.data?.[f.key]
-              const hot = f.key === 'open' && (counts.data?.needs_review ?? 0) > 0
-              return (
-                <button key={f.key} role="tab" aria-selected={filter === f.key} className={filter === f.key ? 'active' : ''} onClick={() => setFilter(f.key)}>
-                  {f.label}
-                  {n !== undefined && <span className={`count ${hot && filter !== f.key ? 'hot' : ''}`}>{n}</span>}
-                </button>
-              )
-            })}
-          </div>
-          <input placeholder="Search shop, order no. or text" value={q} onChange={(e) => setQ(e.target.value)} />
+    <div className="wa">
+      <div className="wa-top">
+        <div>
+          <h1>WhatsApp</h1>
+          <div className="page-sub">Orders read by AI and approved by you, and every chat with your shops.</div>
         </div>
-        <ErrorBox error={list.error} />
-        <div className="desk-items">
-          {list.data && rows.length === 0 && (
-            <div className="empty-state">
-              <div className="big-icon">✓</div>
-              <div>{needle ? 'Nothing matches your search.' : filter === 'open' ? 'All caught up. New WhatsApp orders appear here.' : `No ${FILTERS.find((f) => f.key === filter)?.label.toLowerCase()} orders.`}</div>
-            </div>
-          )}
-          {groups.map((g) => (
-            <div key={g.title || 'all'} style={{ display: 'contents' }}>
-              {g.title && <div className="desk-group-title">{g.title} · {g.rows.length}</div>}
-              {g.rows.map(card)}
-            </div>
-          ))}
+        <div className="view-switch" role="tablist">
+          <button role="tab" aria-selected={view === 'orders'} className={view === 'orders' ? 'active' : ''} onClick={() => setView('orders')}>
+            🧾 Orders {counts.data?.open ? <span className="count">{counts.data.open}</span> : null}
+          </button>
+          <button role="tab" aria-selected={view === 'chats'} className={view === 'chats' ? 'active' : ''} onClick={() => setView('chats')}>
+            💬 Chats
+          </button>
         </div>
-      </div>
-      <div className="desk-detail">
-        {openId ? (
-          <OrderDetail key={openId} id={openId} state={state} onChanged={reload} />
-        ) : (
-          <div className="empty-state" style={{ height: '100%' }}>
-            <div className="big-icon">💬</div>
-            <div><b>Select an order</b></div>
-            <div className="small">Pick an order on the left to check its items and approve the bill.</div>
-          </div>
+        {view === 'orders' && can(perms, 'sales_order.create') && (
+          <button className="btn primary" onClick={() => setNewOrder(true)}>+ Paste order</button>
         )}
       </div>
+      {view === 'chats' ? (
+        <Chats perms={perms} onOpenOrder={(id) => { setView('orders'); setOpenId(id) }} />
+      ) : (
+        <div className="desk">
+          <div className="desk-list">
+            <div className="desk-list-head">
+              <div className="subtabs" role="tablist">
+                {FILTERS.map((f) => {
+                  const n = counts.data?.[f.key]
+                  const hot = (f.key === 'open' && (counts.data?.needs_review ?? 0) > 0) || (f.key === 'messages' && (n ?? 0) > 0)
+                  return (
+                    <button key={f.key} role="tab" aria-selected={filter === f.key} className={filter === f.key ? 'active' : ''} onClick={() => setFilter(f.key)}>
+                      {f.label}
+                      {n !== undefined && <span className={`count ${hot && filter !== f.key ? 'hot' : ''}`}>{n}</span>}
+                    </button>
+                  )
+                })}
+              </div>
+              <div className="list-tools">
+                <input placeholder="Search shop, order no. or text" value={q} onChange={(e) => setQ(e.target.value)} />
+                {canDelete && deletable.length > 0 && (
+                  <button className={`btn ${selecting ? 'primary' : ''}`} onClick={() => { setSelecting(!selecting); setPicked(new Set()) }}>
+                    {selecting ? 'Done' : 'Select'}
+                  </button>
+                )}
+              </div>
+              {selecting && (
+                <div className="select-bar">
+                  <span>{picked.size} selected</span>
+                  <button className="btn small ghost" onClick={() => setPicked(new Set(deletable.map((o) => o.id)))}>Select all {deletable.length}</button>
+                  <button className="btn small danger" disabled={!picked.size || busy} onClick={() => void deletePicked()}>🗑 Delete</button>
+                </div>
+              )}
+              <ErrorBox error={delError} />
+            </div>
+            <ErrorBox error={list.error} />
+            <div className="desk-items">
+              {list.data && rows.length === 0 && (
+                <div className="empty-state">
+                  <div className="big-icon">{filter === 'messages' ? '📭' : '✓'}</div>
+                  <div>
+                    {needle
+                      ? 'Nothing matches your search.'
+                      : filter === 'open'
+                        ? 'All caught up. New WhatsApp orders appear here.'
+                        : filter === 'messages'
+                          ? 'No messages waiting. Complaints and questions from shops land here.'
+                          : `No ${FILTERS.find((f) => f.key === filter)?.label.toLowerCase()} items.`}
+                  </div>
+                </div>
+              )}
+              {groups.map((g) => (
+                <div key={g.title || 'all'} style={{ display: 'contents' }}>
+                  {g.title && <div className="desk-group-title">{g.title} · {g.rows.length}</div>}
+                  {g.rows.map(card)}
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="desk-detail">
+            {openId ? (
+              <OrderDetail key={openId} id={openId} state={state} onChanged={reload} onDeleted={() => { setOpenId(null); reload() }} />
+            ) : (
+              <div className="empty-state hero-empty">
+                <div className="big-icon">🧾</div>
+                <b>Select an order</b>
+                <div className="small">Check the items the AI read, fix anything highlighted, and approve the bill in one click.</div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {newOrder && <NewOrderModal onClose={() => setNewOrder(false)} onCreated={(id) => { setNewOrder(false); setOpenId(id); reload() }} />}
     </div>
   )
 }
 
-function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; onChanged: () => void }) {
+const STEPS: { key: string; label: string }[] = [
+  { key: 'received', label: 'Received' },
+  { key: 'read', label: 'Read by AI' },
+  { key: 'checked', label: 'Checked' },
+  { key: 'billed', label: 'Billed' },
+]
+function stepIndex(status: string): number {
+  if (status === 'approved') return 3
+  if (status === 'draft_ready') return 2
+  if (status === 'needs_review' || status === 'message' || status === 'failed') return 1
+  return 0
+}
+function OrderSteps({ status }: { status: string }) {
+  if (['rejected', 'closed', 'deleted'].includes(status)) return null
+  const at = stepIndex(status)
+  return (
+    <ol className="steps-line">
+      {STEPS.map((s, i) => (
+        <li key={s.key} className={i < at ? 'done' : i === at ? 'now' : ''}>
+          <span className="step-dot">{i < at ? '✓' : i + 1}</span>
+          {s.label}
+        </li>
+      ))}
+    </ol>
+  )
+}
+
+function OrderDetail({ id, state, onChanged, onDeleted }: { id: string; state: AppState; onChanged: () => void; onDeleted: () => void }) {
   const perms = state.user?.permissions
   const [order, setOrder] = useState<Order | null>(null)
   const [remember, setRemember] = useState(true)
@@ -231,6 +320,7 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
   const [reject, setReject] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
   const [showTrace, setShowTrace] = useState(false)
+  const [pane, setPane] = useState<'order' | 'chat'>('order')
   const { busy, error, setError, run } = useAction()
 
   const [flash, setFlash] = useState(false)
@@ -270,6 +360,11 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
     }
     return r
   }
+  async function remove() {
+    if (!window.confirm('Delete this from the desk? Use it for spam, tests and chats that were never orders.')) return
+    const ok = await run(() => ordexa().request('POST', '/api/v1/ai/orders/delete', { ids: [id] }))
+    if (ok) onDeleted()
+  }
   async function approve(newBill = false) {
     const soft = order!.warnings.some((w) => ['credit_review', 'customer_inactive'].includes(w.code)) || order!.lines!.some((l) => l.issues.includes('insufficient_stock'))
     if (soft && !window.confirm('This order has warnings (credit or stock). Approve and bill anyway?')) return
@@ -292,8 +387,24 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
             <span>{new Date(order.received_at).toLocaleString('en-PK')}</span>
           </div>
         </div>
-        <span className={`tag st-${order.status}`}>{STATUS_LABEL[order.status]}</span>
+        <div className="head-side">
+          <span className={`tag st-${order.status}`}>{STATUS_LABEL[order.status]}</span>
+          {can(perms, 'sales_order.approve') && order.status !== 'approved' && (
+            <button className="btn small ghost" title="Delete junk" onClick={() => void remove()}>🗑 Delete</button>
+          )}
+        </div>
+        <OrderSteps status={order.status} />
+        {order.source === 'whatsapp' && order.sender && (
+          <div className="seg pane-switch">
+            <button className={pane === 'order' ? 'active' : ''} onClick={() => setPane('order')}>🧾 Order</button>
+            <button className={pane === 'chat' ? 'active' : ''} onClick={() => setPane('chat')}>💬 Chat with shop</button>
+          </div>
+        )}
       </div>
+      {pane === 'chat' && order.sender ? (
+        <div className="card chat-card"><ChatThread phone={order.sender} perms={perms} compact /></div>
+      ) : (
+      <>
       <div className="message-bubble">
         <div className="muted small">Shop wrote</div>
         {order.raw_text.startsWith('[') && order.kind !== 'text' ? null : order.raw_text}
@@ -417,6 +528,8 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
             <span className="muted small">An approver must create the bill.</span>
           )}
         </div>
+      )}
+      </>
       )}
       <button className="btn ghost small" onClick={() => setShowTrace(!showTrace)}>{showTrace ? 'Hide' : 'Show'} how this was read ({order.extractor})</button>
       {showTrace && <pre className="trace">{JSON.stringify(order.trace, null, 2)}</pre>}

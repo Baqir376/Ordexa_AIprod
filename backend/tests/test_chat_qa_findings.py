@@ -98,7 +98,7 @@ def test_complaint_goes_to_staff_and_help_for_nonsense(make_biz):
     biz = verified(make_biz())
     r = chat(biz, "bakwas service hai, kal ka order abhi tak nahi aaya")
     assert "shikayat" in r
-    msg = orders(biz, "open")[0]
+    msg = orders(biz, "messages")[0]  # complaints have their own tab
     assert msg["status"] == "message"
     assert biz.post(f"/api/v1/ai/orders/{msg['id']}/close").json()["status"] == "closed"
     r = chat(biz, "?")

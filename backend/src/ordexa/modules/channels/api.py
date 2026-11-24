@@ -3,10 +3,11 @@ from __future__ import annotations
 import base64
 import secrets
 import uuid
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ordexa.modules.ai import service as ai
@@ -14,6 +15,7 @@ from ordexa.modules.ai.models import AiOrderRequest
 from ordexa.modules.audit.models import record
 from ordexa.modules.channels import service
 from ordexa.modules.channels.models import WhatsappContact, WhatsappMessage, WhatsappNumber
+from ordexa.modules.channels.service import utcnow
 from ordexa.modules.customers.models import Customer
 from ordexa.modules.identity.service import Principal, current_principal, requires
 from ordexa.modules.jobs.service import run_one
@@ -136,9 +138,89 @@ def messages(phone: str, p: Principal = Depends(requires("customer.view")), sess
         .limit(500)
     )
     return [
-        {"direction": m.direction, "body": m.body, "status": m.status, "error": m.error, "created_at": m.created_at.isoformat()}
+        {
+            "direction": m.direction,
+            "body": m.body,
+            "status": m.status,
+            "error": m.error,
+            "created_at": m.created_at.isoformat(),
+            "ai_order_id": str(m.ai_order_id) if m.ai_order_id else None,
+            "sent_by": m.sent_by if m.direction == "out" else None,
+        }
         for m in rows
     ]
+
+
+@router.get("/conversations")
+def conversations(
+    q: str | None = None, p: Principal = Depends(requires("customer.view")), session: Session = Depends(get_session)
+):
+    """Every WhatsApp chat, newest first: who it is, the last message and how many messages came in today."""
+    newest = (
+        select(WhatsappMessage.phone, func.max(WhatsappMessage.created_at).label("at"))
+        .where(WhatsappMessage.tenant_id == p.tenant_id)
+        .group_by(WhatsappMessage.phone)
+        .subquery()
+    )
+    last = (
+        select(WhatsappMessage)
+        .join(newest, (WhatsappMessage.phone == newest.c.phone) & (WhatsappMessage.created_at == newest.c.at))
+        .where(WhatsappMessage.tenant_id == p.tenant_id)
+    )
+    rows = list({m.phone: m for m in session.scalars(last)}.values())  # one row per chat
+    since = utcnow() - timedelta(hours=24)
+    counts = dict(
+        session.execute(
+            select(WhatsappMessage.phone, func.count())
+            .where(
+                WhatsappMessage.tenant_id == p.tenant_id, WhatsappMessage.direction == "in", WhatsappMessage.created_at >= since
+            )
+            .group_by(WhatsappMessage.phone)
+        ).all()
+    )
+    contacts = {c.phone: c for c in session.scalars(select(WhatsappContact).where(WhatsappContact.tenant_id == p.tenant_id))}
+    out = []
+    for m in rows:
+        c = contacts.get(m.phone)
+        cust = session.get(Customer, c.customer_id) if c and c.customer_id else None
+        name = cust.name if cust else (c.registration_details.split(",")[0] if c and c.registration_details else None)
+        item = {
+            "phone": m.phone,
+            "name": name,
+            "customer_code": cust.code if cust else None,
+            "state": c.state if c else None,
+            "last_body": m.body[:160],
+            "last_direction": m.direction,
+            "last_at": m.created_at.isoformat(),
+            "in_last_24h": counts.get(m.phone, 0),
+        }
+        if q and q.lower() not in f"{m.phone} {name or ''} {item['customer_code'] or ''}".lower():
+            continue
+        out.append(item)
+    return sorted(out, key=lambda x: x["last_at"], reverse=True)[:300]
+
+
+class ReplyIn(BaseModel):
+    phone: str = Field(min_length=6, max_length=20)
+    text: str = Field(min_length=1, max_length=2000)
+
+
+@router.post("/reply")
+def staff_reply(body: ReplyIn, p: Principal = Depends(requires("sales_order.create")), session: Session = Depends(get_session)):
+    """Staff answer a shop from the app (complaints, delivery questions). WhatsApp only allows free text within
+    24 hours of the shop's last message; after that the send is recorded as failed with the reason."""
+    to = service.normalize_phone(body.phone)
+    if to is None:
+        raise OrdexaError(ErrorCode.VALIDATION_ERROR, "invalid phone number")
+    service.queue_text(session, p.tenant_id, to, body.text.strip(), key=f"staff:{uuid.uuid4()}", by="staff")
+    record(session, tenant_id=p.tenant_id, actor_user_id=p.user_id, action="whatsapp.staff_reply",
+           entity_type="whatsapp_contact", entity_id=None, data={"phone": to})  # fmt: skip
+    session.commit()
+    for _ in range(5):  # deliver now (real Cloud API when connected, simulated otherwise)
+        if not run_one(session, "outbox", {"whatsapp.send": service.send_job}):
+            break
+    session.commit()
+    return {"queued": True}
 
 
 @router.post("/simulate")

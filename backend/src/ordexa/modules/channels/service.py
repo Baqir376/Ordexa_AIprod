@@ -75,14 +75,16 @@ def _hash_otp(contact_id: uuid.UUID, code: str) -> str:
 # ------------------------------------------------------------------ outbound
 
 
-def queue_text(session: Session, tenant_id: uuid.UUID, to: str, body: str, key: str, template: str | None = None) -> None:
+def queue_text(
+    session: Session, tenant_id: uuid.UUID, to: str, body: str, key: str, template: str | None = None, by: str | None = None
+) -> None:
     enqueue(
         session,
         kind="whatsapp.send",
         queue="outbox",
         tenant_id=tenant_id,
         idempotency_key=f"wa:{key}"[:200],
-        payload={"to": to, "body": body, "template": template},
+        payload={"to": to, "body": body, "template": template, **({"by": by} if by else {})},
     )
 
 
@@ -123,6 +125,7 @@ def send_job(session: Session, job: Job) -> None:
         phone=p["to"],
         body=p["body"],
         status="simulated",
+        sent_by=p.get("by") or "bot",
     )
     creds = credentials(session, job.tenant_id)
     if creds is not None:

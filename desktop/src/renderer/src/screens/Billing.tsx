@@ -190,6 +190,21 @@ export function Billing({ state }: { state: AppState }) {
   return (
     <div className="billing">
       <section className="bill-main">
+        <div className="bill-head">
+          <div>
+            <h1>New bill</h1>
+            <div className="page-sub">
+              {state.device_name ?? 'This PC'} · series {state.terminal_code ?? '—'}- · {new Date().toLocaleDateString('en-PK', { weekday: 'long', day: 'numeric', month: 'long' })}
+            </div>
+          </div>
+          <div className="bill-keys">
+            <span><kbd>F4</kbd> customer</span>
+            <span><kbd>Enter</kbd> add item</span>
+            <span><kbd>F9</kbd> save</span>
+            <span><kbd>Esc</kbd> clear</span>
+          </div>
+        </div>
+        <div className="card entry-card">
         <div className="customer-row">
           <label className="inline">
             Customer <kbd>F4</kbd>
@@ -286,6 +301,7 @@ export function Billing({ state }: { state: AppState }) {
             Add
           </button>
         </div>
+        </div>
         {picked && picked.batches.length > 0 && (
           <div className="hint">
             Batch: earliest expiry first — <b>{picked.batches[0].batch_no}</b> (exp {picked.batches[0].expiry_date},{' '}
@@ -311,7 +327,11 @@ export function Billing({ state }: { state: AppState }) {
             {lines.length === 0 && (
               <tr>
                 <td colSpan={8} className="empty-row">
-                  No items yet. Start typing a medicine name.
+                  <div className="empty-bill">
+                    <div className="big-icon">💊</div>
+                    <b>No items yet</b>
+                    <div className="small">Type a medicine name, code or scan a barcode, then press Enter.</div>
+                  </div>
                 </td>
               </tr>
             )}
@@ -355,9 +375,10 @@ export function Billing({ state }: { state: AppState }) {
       </section>
 
       <aside className="bill-side card">
-        <div className="sum-row">
-          <span>Items</span>
-          <span>{lines.length}</span>
+        <div className="total-hero">
+          <span className="th-label">{customer ? customer.name : 'Walk-in customer'}</span>
+          <span className="th-total">{formatRs(total)}</span>
+          <span className="th-sub">{lines.length} item{lines.length === 1 ? '' : 's'}</span>
         </div>
         <div className="sum-row">
           <span>Subtotal</span>

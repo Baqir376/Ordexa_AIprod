@@ -1314,6 +1314,24 @@ def reject(session: Session, actor: Principal, request_id: uuid.UUID, reason: st
     return req
 
 
+def delete_requests(session: Session, actor: Principal, ids: list[uuid.UUID]) -> int:
+    """Hide junk requests from every list (soft delete, audited). Billed orders cannot be deleted."""
+    actor.require("sales_order.approve")
+    n = 0
+    for rid in ids:
+        req = session.get(AiOrderRequest, rid)
+        if req is None or req.tenant_id != actor.tenant_id or req.status in ("approved", "deleted"):
+            continue
+        req.trace = (req.trace or []) + [{"step": "deleted", "by": actor.username, "was": req.status, "at": utcnow().isoformat()}]
+        req.status = "deleted"
+        req.reviewed_by = actor.user_id
+        req.reviewed_at = utcnow()
+        record(session, tenant_id=req.tenant_id, actor_user_id=actor.user_id, action="ai_order.deleted",
+               entity_type="ai_order", entity_id=req.id, data={"number": req.number})  # fmt: skip
+        n += 1
+    return n
+
+
 def mark_handled(session: Session, actor: Principal, request_id: uuid.UUID) -> AiOrderRequest:
     actor.require("sales_order.create")
     req = _get(session, actor, request_id)

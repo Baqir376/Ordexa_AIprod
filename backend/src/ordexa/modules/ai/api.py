@@ -131,7 +131,7 @@ def out(session: Session, r: AiOrderRequest, full: bool = True) -> dict:
     return d
 
 
-OPEN_STATUSES = ("received", "processing", "needs_review", "draft_ready", "failed", "message")
+OPEN_STATUSES = ("received", "processing", "needs_review", "draft_ready", "failed")
 
 
 @router.get("/orders/counts")
@@ -146,7 +146,8 @@ def order_counts(p: Principal = Depends(requires("sales_order.view")), session: 
     )
     return {
         "open": sum(rows.get(s, 0) for s in OPEN_STATUSES),
-        "needs_review": rows.get("needs_review", 0) + rows.get("message", 0),
+        "needs_review": rows.get("needs_review", 0),
+        "messages": rows.get("message", 0),
         "approved": rows.get("approved", 0),
         "rejected": rows.get("rejected", 0),
         "closed": rows.get("closed", 0),
@@ -160,8 +161,12 @@ def list_orders(
     q = select(AiOrderRequest).where(AiOrderRequest.tenant_id == p.tenant_id)
     if status == "open":
         q = q.where(AiOrderRequest.status.in_(OPEN_STATUSES))
+    elif status == "messages":
+        q = q.where(AiOrderRequest.status == "message")
     elif status:
         q = q.where(AiOrderRequest.status == status)
+    else:
+        q = q.where(AiOrderRequest.status != "deleted")
     q = q.order_by(AiOrderRequest.received_at.desc()).limit(200)
     return [out(session, r, full=False) for r in session.scalars(q)]
 
@@ -174,6 +179,21 @@ def close_message(
     req = service.mark_handled(session, p, request_id)
     session.commit()
     return out(session, req)
+
+
+class DeleteIn(BaseModel):
+    ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+
+
+@router.post("/orders/delete")
+def delete_orders(
+    body: DeleteIn, p: Principal = Depends(requires("sales_order.approve")), session: Session = Depends(get_session)
+):
+    """Remove junk (spam, test messages, chats that were never orders) from the desk. Billed orders are never
+    removed; the record stays in the audit log."""
+    n = service.delete_requests(session, p, body.ids)
+    session.commit()
+    return {"deleted": n}
 
 
 @router.get("/orders/{request_id}")

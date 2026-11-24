@@ -45,7 +45,25 @@ try {
         await first.click()
         await page.waitForTimeout(1500)
         await shot('04-order-detail')
+        const chatTab = page.getByRole('button', { name: /Chat with shop/ })
+        if (await chatTab.isVisible()) {
+          await chatTab.click()
+          await page.waitForTimeout(1500)
+          await shot('04b-order-chat')
+        }
       }
+      await page.getByRole('tab', { name: /Chats/ }).click()
+      await page.waitForTimeout(1500)
+      const conv = page.locator('.conv').first()
+      if (await conv.isVisible()) await conv.click()
+      await page.waitForTimeout(1500)
+      await shot('04c-chats')
+      await page.getByRole('tab', { name: /Orders/ }).click()
+    }
+    if (label === 'Bills & receipts') {
+      await page.getByRole('button', { name: /All bills/ }).click()
+      await page.waitForTimeout(1500)
+      await shot('02b-all-bills')
     }
   }
   console.log('SCREENS OK', errors)
