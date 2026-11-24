@@ -48,6 +48,7 @@ interface Order {
   invoice: { id: string; number: string; total: string } | null
   review_note: string | null
   shop_updates?: ShopUpdate[]
+  stage?: string
   add_to_bill?: { invoice_id: string; number: string; order: string | null; possible: boolean; reason: string | null } | null
   lines?: Line[]
   questions?: string[]
@@ -92,18 +93,35 @@ const ISSUE_TEXT: Record<string, string> = {
 }
 
 type Filter = 'open' | 'messages' | 'approved' | 'rejected' | 'closed'
-const FILTERS: { key: Filter; label: string }[] = [
-  { key: 'open', label: 'Open' },
-  { key: 'messages', label: 'Messages' },
-  { key: 'approved', label: 'Approved' },
-  { key: 'rejected', label: 'Rejected' },
-  { key: 'closed', label: 'By bot' },
+const FILTERS: { key: Filter; label: string; icon: string; help: string }[] = [
+  { key: 'open', label: 'To do', icon: '📥', help: 'New orders. Approve the green ones, fix the amber ones; blue ones are waiting for the shop to answer the bot.' },
+  { key: 'messages', label: 'Messages', icon: '💬', help: 'Complaints and questions from shops that need a person. Reply in Chats, then mark them handled.' },
+  { key: 'approved', label: 'Billed', icon: '✅', help: 'Orders you approved. Their bills were sent to the shop on WhatsApp.' },
+  { key: 'rejected', label: 'Rejected', icon: '⛔', help: 'Orders you rejected or the shop cancelled.' },
+  { key: 'closed', label: 'Bot replied', icon: '🤖', help: 'Messages the bot answered by itself: balance, a copy of the last bill, rates, greetings. Nothing for you to do.' },
 ]
+
+/** One clear label per order, from what has to happen next. */
+const STAGE: Record<string, { label: string; tone: string }> = {
+  ready: { label: 'Ready to approve', tone: 'ready' },
+  fix: { label: 'Needs your fix', tone: 'fix' },
+  waiting_shop: { label: 'Waiting for shop', tone: 'waiting' },
+  reading: { label: 'AI reading…', tone: 'reading' },
+  message: { label: 'Message', tone: 'message' },
+  approved: { label: 'Billed', tone: 'billed' },
+  rejected: { label: 'Rejected', tone: 'muted' },
+  closed: { label: 'Auto-answered', tone: 'muted' },
+}
+function stageOf(o: Order) {
+  if (o.status === 'rejected' && o.review_note?.startsWith('Cancelled by the shop')) return { label: 'Cancelled by shop', tone: 'muted' }
+  return STAGE[o.stage ?? o.status] ?? { label: STATUS_LABEL[o.status] ?? o.status, tone: 'muted' }
+}
 // Open orders are grouped by what someone has to do next.
-const GROUPS: { title: string; statuses: string[] }[] = [
-  { title: 'Needs your attention', statuses: ['needs_review', 'failed'] },
-  { title: 'Ready to approve', statuses: ['draft_ready'] },
-  { title: 'Being read by AI', statuses: ['received', 'processing'] },
+const GROUPS: { title: string; stages: string[]; tone: string }[] = [
+  { title: 'Ready to approve', stages: ['ready'], tone: 'ready' },
+  { title: 'Needs your fix', stages: ['fix'], tone: 'fix' },
+  { title: 'Waiting for the shop to reply', stages: ['waiting_shop'], tone: 'waiting' },
+  { title: 'AI is reading', stages: ['reading'], tone: 'reading' },
 ]
 
 export function AiOrders({ state }: { state: AppState }) {
@@ -131,8 +149,8 @@ export function AiOrders({ state }: { state: AppState }) {
   const rows = (list.data ?? []).filter((o) =>
     !needle || [o.number, o.customer?.name, o.customer?.code, o.sender, o.raw_text].some((v) => v?.toLowerCase().includes(needle)))
   const groups = filter === 'open'
-    ? GROUPS.map((g) => ({ ...g, rows: rows.filter((o) => g.statuses.includes(o.status)) })).filter((g) => g.rows.length)
-    : [{ title: '', statuses: [], rows }]
+    ? GROUPS.map((g) => ({ ...g, rows: rows.filter((o) => g.stages.includes(o.stage ?? '')) })).filter((g) => g.rows.length)
+    : [{ title: '', stages: [], tone: '', rows }]
   const deletable = rows.filter((o) => o.status !== 'approved')
 
   function toggle(id: string) {
@@ -162,7 +180,7 @@ export function AiOrders({ state }: { state: AppState }) {
     return (
       <button
         key={o.id}
-        className={`order-card st-${o.status} ${openId === o.id && !selecting ? 'active' : ''} ${sel ? 'picked' : ''}`}
+        className={`order-card tone-${stageOf(o).tone} ${openId === o.id && !selecting ? 'active' : ''} ${sel ? 'picked' : ''}`}
         onClick={() => (selecting ? o.status !== 'approved' && toggle(o.id) : setOpenId(o.id))}
       >
         {selecting ? (
@@ -172,7 +190,7 @@ export function AiOrders({ state }: { state: AppState }) {
         )}
         <div className="oc-top">
           <b title={who}>{who}</b>
-          <span className={`tag st-${o.status}`}>{STATUS_LABEL[o.status] ?? o.status}</span>
+          <span className={`stage-chip tone-${stageOf(o).tone}`}>{stageOf(o).tone === 'ready' && <i className="pulse" />}{stageOf(o).label}</span>
         </div>
         <div className="oc-text">
           {o.kind === 'image' ? '📷 Photo ' : o.kind === 'audio' ? '🎤 Voice note ' : ''}
@@ -214,18 +232,20 @@ export function AiOrders({ state }: { state: AppState }) {
         <div className="desk">
           <div className="desk-list">
             <div className="desk-list-head">
-              <div className="subtabs" role="tablist">
+              <div className="folders" role="tablist">
                 {FILTERS.map((f) => {
                   const n = counts.data?.[f.key]
-                  const hot = (f.key === 'open' && (counts.data?.needs_review ?? 0) > 0) || (f.key === 'messages' && (n ?? 0) > 0)
+                  const hot = (f.key === 'open' && (counts.data?.ready ?? 0) + (counts.data?.fix ?? 0) > 0) || (f.key === 'messages' && (n ?? 0) > 0)
                   return (
-                    <button key={f.key} role="tab" aria-selected={filter === f.key} className={filter === f.key ? 'active' : ''} onClick={() => setFilter(f.key)}>
-                      {f.label}
+                    <button key={f.key} role="tab" aria-selected={filter === f.key} className={`folder ${filter === f.key ? 'active' : ''}`} onClick={() => setFilter(f.key)} title={f.help}>
+                      <span className="folder-icon">{f.icon}</span>
+                      <span className="folder-label">{f.label}</span>
                       {n !== undefined && <span className={`count ${hot && filter !== f.key ? 'hot' : ''}`}>{n}</span>}
                     </button>
                   )
                 })}
               </div>
+              <div className="folder-help">{FILTERS.find((f) => f.key === filter)?.help}</div>
               <div className="list-tools">
                 <input placeholder="Search shop, order no. or text" value={q} onChange={(e) => setQ(e.target.value)} />
                 {canDelete && deletable.length > 0 && (
@@ -261,7 +281,7 @@ export function AiOrders({ state }: { state: AppState }) {
               )}
               {groups.map((g) => (
                 <div key={g.title || 'all'} style={{ display: 'contents' }}>
-                  {g.title && <div className="desk-group-title">{g.title} · {g.rows.length}</div>}
+                  {g.title && <div className={`desk-group-title tone-${g.tone}`}><i />{g.title}<span>{g.rows.length}</span></div>}
                   {g.rows.map(card)}
                 </div>
               ))}
@@ -388,7 +408,7 @@ function OrderDetail({ id, state, onChanged, onDeleted }: { id: string; state: A
           </div>
         </div>
         <div className="head-side">
-          <span className={`tag st-${order.status}`}>{STATUS_LABEL[order.status]}</span>
+          <span className={`stage-chip tone-${stageOf(order).tone}`}>{stageOf(order).tone === 'ready' && <i className="pulse" />}{stageOf(order).label}</span>
           {can(perms, 'sales_order.approve') && order.status !== 'approved' && (
             <button className="btn small ghost" title="Delete junk" onClick={() => void remove()}>🗑 Delete</button>
           )}

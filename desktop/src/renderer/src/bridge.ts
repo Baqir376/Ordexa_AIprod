@@ -33,6 +33,7 @@ export interface OrdexaBridge {
   openBackups(): Promise<string>
   request<T = any>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T>
   dataUrl(path: string): Promise<string>
+  openFile(path: string, name: string): Promise<string>
   onState(fn: (s: AppState) => void): () => void
 }
 

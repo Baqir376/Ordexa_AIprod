@@ -65,6 +65,7 @@ const NAV: NavItem[] = [
 
 export function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
   const perms = state.user?.permissions
+  const notice = useNotice(state)
   const visible = NAV.filter((n) => !n.perm || can(perms, n.perm))
   const [tab, setTab] = useState<string>(visible[0]?.key ?? 'bills')
   const [sub, setSub] = useState<string | undefined>()
@@ -111,11 +112,13 @@ export function Shell({ state, refresh }: { state: AppState; refresh: () => void
   else if (tab === 'settings') body = <Settings state={state} />
 
   const groups = [...new Set(visible.map((n) => n.group))]
+  const todo = notice ? notice.ready + notice.fix + notice.messages : 0
   return (
     <div className="shell">
       <header className="topbar">
         <BrandHeader state={state} />
         <div className="topbar-right">
+          {notice && <Bell counts={notice} onOpen={() => go('ai')} />}
           <SyncPill state={state} />
           <div className="user">
             {user.full_name}
@@ -136,6 +139,7 @@ export function Shell({ state, refresh }: { state: AppState; refresh: () => void
                 <button key={n.key} className={tab === n.key ? 'active' : ''} onClick={() => go(n.key)}>
                   <Icon name={n.key} />
                   <span className="nav-label">{n.label}</span>
+                  {n.key === 'ai' && todo > 0 && <span className="nav-badge" title="Orders and messages waiting for you">{todo}</span>}
                   {n.key_hint && <kbd>{n.key_hint}</kbd>}
                 </button>
               ))}
@@ -153,6 +157,61 @@ export function Shell({ state, refresh }: { state: AppState; refresh: () => void
         </span>
         <span>{state.branding?.powered_by ?? 'Powered by Ordexa ERP'}</span>
       </footer>
+    </div>
+  )
+}
+
+
+interface Notice { ready: number; fix: number; messages: number; waiting_shop: number }
+
+/** What is waiting for staff on the WhatsApp desk (polled while signed in online). */
+function useNotice(state: AppState): Notice | null {
+  const [n, setN] = useState<Notice | null>(null)
+  const allowed = state.user?.online && can(state.user?.permissions, 'sales_order.view')
+  useEffect(() => {
+    if (!allowed) return
+    let alive = true
+    const load = () =>
+      void ordexa()
+        .request<Notice>('GET', '/api/v1/ai/orders/counts')
+        .then((r) => alive && setN(r), () => undefined)
+    load()
+    const t = setInterval(load, 15_000)
+    return () => { alive = false; clearInterval(t) }
+  }, [allowed])
+  return allowed ? n : null
+}
+
+function Bell({ counts, onOpen }: { counts: Notice; onOpen: () => void }) {
+  const [open, setOpen] = useState(false)
+  const total = counts.ready + counts.fix + counts.messages
+  const rows: [string, number, string][] = [
+    ['Ready to approve', counts.ready, 'ok'],
+    ['Need your fix', counts.fix, 'warn'],
+    ['Messages from shops', counts.messages, 'bad'],
+    ['Waiting for the shop to reply', counts.waiting_shop, 'info'],
+  ]
+  return (
+    <div className="bell-wrap">
+      <button className={`bell ${total ? 'has' : ''}`} onClick={() => setOpen(!open)} aria-label={`${total} items waiting`} title="WhatsApp desk">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+        </svg>
+        {total > 0 && <span className="bell-count">{total > 99 ? '99+' : total}</span>}
+      </button>
+      {open && (
+        <div className="bell-pop card" onMouseLeave={() => setOpen(false)}>
+          <div className="bell-title">WhatsApp desk</div>
+          {rows.map(([label, n, tone]) => (
+            <button key={label} className="bell-row" onClick={() => { setOpen(false); onOpen() }}>
+              <span className={`dot-${tone}`} />
+              <span>{label}</span>
+              <b>{n}</b>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

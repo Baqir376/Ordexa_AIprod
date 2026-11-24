@@ -131,14 +131,20 @@ def unlink_contact(contact_id: uuid.UUID, p: Principal = Depends(current_princip
 @router.get("/messages")
 def messages(phone: str, p: Principal = Depends(requires("customer.view")), session: Session = Depends(get_session)):
     to = service.normalize_phone(phone)
-    rows = session.scalars(
-        select(WhatsappMessage)
-        .where(WhatsappMessage.tenant_id == p.tenant_id, WhatsappMessage.phone == to)
-        .order_by(WhatsappMessage.created_at, WhatsappMessage.direction)
-        .limit(500)
+    rows = list(
+        session.scalars(
+            select(WhatsappMessage)
+            .where(WhatsappMessage.tenant_id == p.tenant_id, WhatsappMessage.phone == to)
+            .order_by(WhatsappMessage.created_at, WhatsappMessage.direction)
+            .limit(500)
+        )
     )
+    ids = [m.ai_order_id for m in rows if m.ai_order_id]
+    orders = {o.id: o for o in session.scalars(select(AiOrderRequest).where(AiOrderRequest.id.in_(ids)))} if ids else {}
     return [
         {
+            "media": _media(m, orders.get(m.ai_order_id)),
+            "order": _order_chip(orders.get(m.ai_order_id)) if m.direction == "in" else None,
             "direction": m.direction,
             "body": m.body,
             "status": m.status,
@@ -149,6 +155,38 @@ def messages(phone: str, p: Principal = Depends(requires("customer.view")), sess
         }
         for m in rows
     ]
+
+
+def _media(m: WhatsappMessage, order: AiOrderRequest | None) -> dict | None:
+    """What the chat can show or play: a bill PDF we sent, or the photo / voice note the shop sent."""
+    if m.media_ref and m.media_ref.startswith("invoice:"):
+        inv_id = m.media_ref.split(":", 1)[1]
+        name = m.body[6 : m.body.index("]")] if m.body.startswith("[PDF: ") and "]" in m.body else "Bill.pdf"
+        return {"kind": "pdf", "path": f"/api/v1/invoices/{inv_id}/pdf", "name": name}
+    if m.direction == "in" and order is not None and order.attachment_id and order.kind in ("image", "audio"):
+        return {"kind": order.kind, "path": f"/api/v1/ai/orders/{order.id}/attachment", "name": order.number}
+    return None
+
+
+def _order_chip(order: AiOrderRequest | None) -> dict | None:
+    if order is None or order.status in ("closed", "deleted"):
+        return None
+    return {"id": str(order.id), "number": order.number, "status": order.status}
+
+
+class ReadIn(BaseModel):
+    phone: str = Field(min_length=6, max_length=20)
+
+
+@router.post("/conversations/read")
+def mark_read(body: ReadIn, p: Principal = Depends(requires("customer.view")), session: Session = Depends(get_session)):
+    """Staff opened this chat: its unread count goes back to zero."""
+    to = service.normalize_phone(body.phone) or body.phone
+    c = session.scalar(select(WhatsappContact).where(WhatsappContact.tenant_id == p.tenant_id, WhatsappContact.phone == to))
+    if c is not None:
+        c.last_read_at = utcnow()
+        session.commit()
+    return {"ok": True}
 
 
 @router.get("/conversations")
@@ -179,6 +217,16 @@ def conversations(
         ).all()
     )
     contacts = {c.phone: c for c in session.scalars(select(WhatsappContact).where(WhatsappContact.tenant_id == p.tenant_id))}
+    # Unread = shop messages since staff last opened the chat (never opened: everything from the last 24 hours).
+    unread: dict[str, int] = {}
+    for phone, at in session.execute(
+        select(WhatsappMessage.phone, WhatsappMessage.created_at).where(
+            WhatsappMessage.tenant_id == p.tenant_id, WhatsappMessage.direction == "in", WhatsappMessage.created_at >= since
+        )
+    ):
+        c = contacts.get(phone)
+        if c is None or c.last_read_at is None or at > c.last_read_at:
+            unread[phone] = unread.get(phone, 0) + 1
     out = []
     for m in rows:
         c = contacts.get(m.phone)
@@ -193,6 +241,7 @@ def conversations(
             "last_direction": m.direction,
             "last_at": m.created_at.isoformat(),
             "in_last_24h": counts.get(m.phone, 0),
+            "unread": unread.get(m.phone, 0),
         }
         if q and q.lower() not in f"{m.phone} {name or ''} {item['customer_code'] or ''}".lower():
             continue

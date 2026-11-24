@@ -52,6 +52,7 @@ class WhatsappContact(Base):
     verified_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 24-hour reply window
+    last_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # staff opened the chat (unread count)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -72,4 +73,5 @@ class WhatsappMessage(Base):
     ai_order_id: Mapped[uuid.UUID | None] = mapped_column()
     error: Mapped[str | None] = mapped_column(String(500))
     sent_by: Mapped[str | None] = mapped_column(String(20))  # out: "bot" (default) or "staff"
+    media_ref: Mapped[str | None] = mapped_column(String(120))  # e.g. "invoice:<id>" for a bill PDF sent to the shop
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

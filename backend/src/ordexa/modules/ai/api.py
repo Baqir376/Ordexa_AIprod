@@ -94,6 +94,20 @@ def _add_to_bill(session: Session, r: AiOrderRequest) -> dict | None:
             "reason": blocker}  # fmt: skip
 
 
+def stage(r: AiOrderRequest) -> str:
+    """What has to happen next, in plain words for the desk: ready (approve it), fix (staff must correct something),
+    waiting_shop (the bot asked the shop a question), reading (AI busy), plus the final states."""
+    if r.status == "draft_ready":
+        return "ready"
+    if r.status == "needs_review":
+        return "waiting_shop" if (r.questions and r.customer_id) else "fix"
+    if r.status in ("received", "processing"):
+        return "reading"
+    if r.status == "failed":
+        return "fix"
+    return r.status
+
+
 def out(session: Session, r: AiOrderRequest, full: bool = True) -> dict:
     c = session.get(Customer, r.customer_id) if r.customer_id else None
     inv = session.get(Invoice, r.invoice_id) if r.invoice_id else None
@@ -115,6 +129,7 @@ def out(session: Session, r: AiOrderRequest, full: bool = True) -> dict:
         "invoice": {"id": str(inv.id), "number": inv.number, "total": str(inv.total)} if inv else None,
         "review_note": r.review_note,
         "shop_updates": shop_updates(r),
+        "stage": stage(r),
         "add_to_bill": _add_to_bill(session, r),
     }
     if full:
@@ -134,6 +149,20 @@ def out(session: Session, r: AiOrderRequest, full: bool = True) -> dict:
 OPEN_STATUSES = ("received", "processing", "needs_review", "draft_ready", "failed")
 
 
+def _stage_counts(session: Session, tenant_id) -> dict:
+    ready = fix = waiting = 0
+    for r in session.scalars(
+        select(AiOrderRequest).where(
+            AiOrderRequest.tenant_id == tenant_id, AiOrderRequest.status.in_(("draft_ready", "needs_review", "failed"))
+        )
+    ):
+        s = stage(r)
+        ready += s == "ready"
+        fix += s == "fix"
+        waiting += s == "waiting_shop"
+    return {"ready": ready, "fix": fix, "waiting_shop": waiting}
+
+
 @router.get("/orders/counts")
 def order_counts(p: Principal = Depends(requires("sales_order.view")), session: Session = Depends(get_session)):
     """How many orders are in each desk tab (open = everything still waiting for someone)."""
@@ -147,6 +176,7 @@ def order_counts(p: Principal = Depends(requires("sales_order.view")), session: 
     return {
         "open": sum(rows.get(s, 0) for s in OPEN_STATUSES),
         "needs_review": rows.get("needs_review", 0),
+        **_stage_counts(session, p.tenant_id),
         "messages": rows.get("message", 0),
         "approved": rows.get("approved", 0),
         "rejected": rows.get("rejected", 0),

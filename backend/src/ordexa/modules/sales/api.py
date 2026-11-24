@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, time, timedelta
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -60,6 +60,22 @@ def list_invoices(
         stmt = stmt.where(Invoice.issued_at >= start - timedelta(days=1))
         return [r for r in (_row(session, i) for i in session.scalars(stmt)) if r["business_date"] == d.isoformat()]
     return [_row(session, i) for i in session.scalars(stmt)]
+
+
+@router.get("/{invoice_id}/pdf")
+def invoice_pdf_file(
+    invoice_id: uuid.UUID, p: Principal = Depends(requires("invoice.view")), session: Session = Depends(get_session)
+):
+    from ordexa.modules.sales.receipt import invoice_pdf
+
+    inv = session.get(Invoice, invoice_id)
+    if inv is None or inv.tenant_id != p.tenant_id:
+        raise OrdexaError(ErrorCode.NOT_FOUND, "bill not found")
+    return Response(
+        invoice_pdf(session, inv),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="Bill-{inv.number}.pdf"'},
+    )
 
 
 @router.get("/{invoice_id}")

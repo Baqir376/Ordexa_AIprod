@@ -123,7 +123,8 @@ FOLLOWUP_SCHEMA = {
 
 FOLLOWUP_PROMPT = """You help a medicine distributor understand a pharmacy's follow-up WhatsApp message about an order
 it already sent. You get the current order (numbered items), the question the bot last asked the shop (if any) and
-the shop's new message (English, Urdu, Roman Urdu or mixed). Decide what the shop wants:
+the shop's new message (English, Urdu, Roman Urdu or mixed). The recent chat is context only: decide what the
+shop's NEW message wants:
 
 - answer_question: it answers the bot's question. If it picks one of the listed options (by number or by name), put
   that option's number in "option". If it gives a quantity for the item asked about, add a set_quantity action.
@@ -289,10 +290,27 @@ def _order_for_prompt(req: AiOrderRequest) -> str:
     return "\n".join(rows) or "(no items)"
 
 
+def _recent_chat(session: Session, req: AiOrderRequest, limit: int = 8) -> str:
+    """The last few chat lines with this shop (oldest first), so a reply like "haan wohi" is read in context."""
+    from ordexa.modules.channels.models import WhatsappMessage
+
+    rows = list(
+        session.scalars(
+            select(WhatsappMessage)
+            .where(WhatsappMessage.tenant_id == req.tenant_id, WhatsappMessage.phone == req.sender)
+            .order_by(WhatsappMessage.created_at.desc())
+            .limit(limit)
+        )
+    )[::-1]
+    lines = [f"{'shop' if m.direction == 'in' else 'bot'}: {guardrails.sanitize_input(m.body)[:200]}" for m in rows]
+    return "\n".join(lines) or "(none)"
+
+
 def _understand_with_ai(session: Session, req: AiOrderRequest, text: str) -> str | None:
     clean = guardrails.sanitize_input(text)
     q = ai.first_question(req)
     user = (
+        f"<recent_chat>\n{_recent_chat(session, req)}\n</recent_chat>\n"
         f'<current_order number="{req.number}">\n{_order_for_prompt(req)}\n</current_order>\n'
         f"<bot_question>\n{q or '(none)'}\n</bot_question>\n<shop_message>\n{clean}\n</shop_message>"
     )

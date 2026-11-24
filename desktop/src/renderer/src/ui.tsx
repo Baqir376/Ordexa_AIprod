@@ -104,11 +104,31 @@ export function Table<T>({ rows, columns, empty = 'Nothing here yet.', onRow }: 
   )
 }
 
-export function Page({ title, actions, children }: { title: string; actions?: ReactNode; children: ReactNode }) {
+/** One line under each page title saying what the page is for (so nobody has to guess). */
+const PAGE_HELP: [string, string][] = [
+  ['Dashboard', "Today's sales, money owed to you and alerts at a glance."],
+  ['Customers', 'Your shops: credit limits, what they owe, their ledger, and receiving payments.'],
+  ['Products', 'Every medicine you sell: price, unit, stock by batch and reorder level.'],
+  ['Purchases', 'Stock you received from suppliers. Receiving adds batches and stock.'],
+  ['Suppliers', 'Companies you buy from and what you owe them.'],
+  ['Sales returns', 'Goods a shop sent back. A credit note lowers what the shop owes.'],
+  ['Cheques', 'Cheques received from shops: mark them cleared or bounced.'],
+  ['Expenses', 'Day-to-day spending (rent, fuel, salaries) for the profit report.'],
+  ['Reports', 'Sales, stock, ageing and profit reports for any period.'],
+  ['Staff', 'Who can sign in and what each person is allowed to do.'],
+  ['Settings', 'Your business details, WhatsApp connection, printer, backups and billing PCs.'],
+  ['WhatsApp sign-ups', 'Shops asking to order on WhatsApp. Approve a number to link it to a customer.'],
+]
+
+export function Page({ title, subtitle, actions, children }: { title: string; subtitle?: string; actions?: ReactNode; children: ReactNode }) {
+  const help = subtitle ?? PAGE_HELP.find(([k]) => title.startsWith(k))?.[1]
   return (
     <div className="page">
       <div className="page-head">
-        <h1>{title}</h1>
+        <div>
+          <h1>{title}</h1>
+          {help && <div className="page-sub">{help}</div>}
+        </div>
         <div className="page-actions">{actions}</div>
       </div>
       {children}

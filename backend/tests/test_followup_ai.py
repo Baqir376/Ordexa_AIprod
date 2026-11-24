@@ -113,3 +113,10 @@ def test_ai_failure_falls_back_to_rules(shop, plan):
 def test_thanks_without_an_open_order_creates_nothing(shop):
     assert "shukriya" in say(shop, "thank you").lower()
     assert orders(shop) == []
+
+
+def test_ai_reads_the_recent_chat_as_context(shop, plan):
+    say(shop, "5 botal calpol")
+    plan["plan"] = {"intent": "thanks", "option": None, "actions": []}
+    say(shop, "theek hai wohi rakho")
+    assert "<recent_chat>" in plan["seen"] and "shop: 5 botal calpol" in plan["seen"]

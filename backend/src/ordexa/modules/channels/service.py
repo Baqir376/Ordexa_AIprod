@@ -127,6 +127,9 @@ def send_job(session: Session, job: Job) -> None:
         status="simulated",
         sent_by=p.get("by") or "bot",
     )
+    doc_spec = p.get("document") or {}
+    if doc_spec.get("kind") == "invoice" and doc_spec.get("invoice_id"):
+        msg.media_ref = f"invoice:{doc_spec['invoice_id']}"
     creds = credentials(session, job.tenant_id)
     if creds is not None:
         in_window = contact and contact.last_message_at and utcnow() - contact.last_message_at < REPLY_WINDOW

@@ -142,6 +142,18 @@ app.whenReady().then(() => {
   handle('receipts.list', () => (requireUser(), client.billing.listReceipts(200)))
   handle('api.request', (method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown) => client.request(method, path, body))
   handle('api.dataUrl', (path: string) => client.requestDataUrl(path))
+  // Open a file from the server (e.g. a bill PDF) in the PC's own viewer: saved to a temp folder first.
+  handle('api.openFile', async (path: string, name: string) => {
+    const url = await client.requestDataUrl(path)
+    const safe = (name || 'file').replace(/[^\w.\-]+/g, '_').slice(0, 80)
+    const dir = join(app.getPath('temp'), 'ordexa-files')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, safe)
+    writeFileSync(file, Buffer.from(url.slice(url.indexOf(',') + 1), 'base64'))
+    const err = await shell.openPath(file)
+    if (err) throw new Error(err)
+    return file
+  })
   handle('printers.list', async () => (win ? (await win.webContents.getPrintersAsync()).map((p) => p.name) : []))
   handle('printer.get', () => ({ name: client.store.getMeta('printer_name'), auto: client.store.getMeta('auto_print') === '1' }))
   handle('printer.set', (name: string | null, auto: boolean) => {

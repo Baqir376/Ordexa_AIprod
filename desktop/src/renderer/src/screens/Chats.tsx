@@ -13,6 +13,57 @@ export interface ChatMessage {
   created_at: string
   ai_order_id: string | null
   sent_by: 'bot' | 'staff' | null
+  media: { kind: 'pdf' | 'image' | 'audio'; path: string; name: string } | null
+  order: { id: string; number: string; status: string } | null
+}
+
+const ORDER_STATE: Record<string, string> = {
+  received: 'AI reading', processing: 'AI reading', needs_review: 'Needs attention', draft_ready: 'Ready to approve',
+  approved: 'Billed', rejected: 'Rejected', message: 'Message', failed: 'Needs attention',
+}
+
+/** A photo or voice note from the shop, or a bill PDF we sent: shown and played right in the chat. */
+function MediaView({ media }: { media: NonNullable<ChatMessage['media']> }) {
+  const [url, setUrl] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [zoom, setZoom] = useState(false)
+  const [opening, setOpening] = useState(false)
+  useEffect(() => {
+    if (media.kind === 'pdf') return
+    let alive = true
+    ordexa().dataUrl(media.path).then((u) => alive && setUrl(u), (e: Error) => alive && setErr(e.message))
+    return () => { alive = false }
+  }, [media.path, media.kind])
+  if (media.kind === 'pdf') {
+    return (
+      <button
+        className="pdf-card"
+        disabled={opening}
+        onClick={() => {
+          setOpening(true)
+          void ordexa().openFile(media.path, media.name).catch((e: Error) => setErr(e.message)).finally(() => setOpening(false))
+        }}
+        title="Open the bill"
+      >
+        <span className="pdf-icon">PDF</span>
+        <span className="pdf-name">{media.name}<small>{opening ? 'Opening…' : 'Click to open'}</small></span>
+        {err && <span className="bubble-error">{err}</span>}
+      </button>
+    )
+  }
+  if (err) return <div className="bubble-error">{err}</div>
+  if (!url) return <div className="media-loading">{media.kind === 'audio' ? '🎤 Loading voice note…' : '📷 Loading photo…'}</div>
+  if (media.kind === 'audio') return <audio className="chat-audio" controls src={url} />
+  return (
+    <>
+      <img className="chat-photo" src={url} alt="Photo sent by the shop" onClick={() => setZoom(true)} />
+      {zoom && (
+        <div className="modal-backdrop" onMouseDown={() => setZoom(false)}>
+          <img className="attachment-zoom" src={url} alt="Photo, enlarged" />
+        </div>
+      )}
+    </>
+  )
 }
 interface Conversation {
   phone: string
@@ -23,6 +74,7 @@ interface Conversation {
   last_direction: 'in' | 'out'
   last_at: string
   in_last_24h: number
+  unread: number
 }
 
 export function initials(name: string): string {
@@ -44,10 +96,11 @@ const time = (iso: string) => new Date(iso).toLocaleTimeString('en-PK', { hour: 
 const day = (iso: string) => new Date(iso).toLocaleDateString('en-PK', { weekday: 'short', day: 'numeric', month: 'short' })
 
 /** One chat thread, WhatsApp style. Refreshes itself; optional reply box for staff. */
-export function ChatThread({ phone, perms, onOpenOrder, compact = false }: {
+export function ChatThread({ phone, perms, onOpenOrder, onRead, compact = false }: {
   phone: string
   perms?: string[]
   onOpenOrder?: (id: string) => void
+  onRead?: () => void
   compact?: boolean
 }) {
   const msgs = useApi<ChatMessage[]>(`/api/v1/channels/whatsapp/messages?phone=${encodeURIComponent(phone)}`, [phone])
@@ -60,6 +113,10 @@ export function ChatThread({ phone, perms, onOpenOrder, compact = false }: {
     const t = setInterval(() => void msgs.reload(), 5000)
     return () => clearInterval(t)
   }, [msgs.reload])
+  useEffect(() => {
+    if (count > 0) void ordexa().request('POST', '/api/v1/channels/whatsapp/conversations/read', { phone }).then(onRead, () => undefined)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [count, phone])
   useEffect(() => {
     // braces matter: newer Chromium returns a Promise from scrollIntoView, and React would call it as a cleanup
     end.current?.scrollIntoView({ block: 'end' })
@@ -84,24 +141,27 @@ export function ChatThread({ phone, perms, onOpenOrder, compact = false }: {
           const d = day(m.created_at)
           const sep = d !== lastDay
           lastDay = d
-          const pdf = m.body.startsWith('[PDF: ')
-          const body = pdf ? m.body.replace(/^\[PDF: [^\]]+\]\s*/, '') : m.body
+          const body = m.body.replace(/^\[PDF: [^\]]+\]\s*/, '').replace(/^\[(image|audio)\]\s*/, '')
           return (
             <div key={i} style={{ display: 'contents' }}>
               {sep && <div className="day-sep"><span>{d}</span></div>}
               <div className={`bubble ${m.direction}`}>
                 {m.direction === 'out' && <div className={`who ${m.sent_by === 'staff' ? 'staff' : ''}`}>{m.sent_by === 'staff' ? 'Staff' : 'Bot'}</div>}
-                {pdf && <div className="pdf-chip">📄 {m.body.match(/^\[PDF: ([^\]]+)\]/)?.[1]}</div>}
-                {body}
+                {m.media && <MediaView media={m.media} />}
+                {body && <div className="bubble-text">{body}</div>}
                 <div className="meta">
-                  {m.ai_order_id && onOpenOrder && m.direction === 'in' && (
-                    <button className="link" onClick={() => onOpenOrder(m.ai_order_id!)}>open order</button>
-                  )}
                   <span>{time(m.created_at)}</span>
                   {m.direction === 'out' && <span className={`tick ${m.status}`} title={m.error ?? m.status}>{m.status === 'failed' ? '!' : '✓✓'}</span>}
                 </div>
                 {m.status === 'failed' && m.error && <div className="bubble-error">{m.error}</div>}
               </div>
+              {m.order && onOpenOrder && (
+                <button className="order-chip" onClick={() => onOpenOrder(m.order!.id)}>
+                  <span className="oc-ico">🧾</span>
+                  <span><b>{m.order.number}</b> · {ORDER_STATE[m.order.status] ?? m.order.status}</span>
+                  <span className="oc-go">Open ›</span>
+                </button>
+              )}
             </div>
           )
         })}
@@ -143,7 +203,7 @@ export function Chats({ perms, onOpenOrder }: { perms?: string[]; onOpenOrder: (
         <div className="chat-list-items">
           {list.data?.length === 0 && <div className="chat-empty">No chats yet.</div>}
           {list.data?.map((c) => (
-            <button key={c.phone} className={`conv ${phone === c.phone ? 'active' : ''}`} onClick={() => setPhone(c.phone)}>
+            <button key={c.phone} className={`conv ${phone === c.phone ? 'active' : ''} ${c.unread && phone !== c.phone ? 'unread' : ''}`} onClick={() => setPhone(c.phone)}>
               <span className={`avatar ${c.customer_code ? '' : 'stranger'}`}>{initials(c.name ?? c.phone.slice(-2))}</span>
               <span className="conv-main">
                 <span className="conv-top">
@@ -155,7 +215,7 @@ export function Chats({ perms, onOpenOrder }: { perms?: string[]; onOpenOrder: (
                   {c.last_body.replace(/^\[PDF: [^\]]+\]\s*/, '📄 ')}
                 </span>
               </span>
-              {c.in_last_24h > 0 && <span className="conv-count" title="messages in the last 24 hours">{c.in_last_24h}</span>}
+              {c.unread > 0 && phone !== c.phone && <span className="conv-count" title="unread messages">{c.unread}</span>}
             </button>
           ))}
         </div>
@@ -174,7 +234,7 @@ export function Chats({ perms, onOpenOrder }: { perms?: string[]; onOpenOrder: (
                 </div>
               </div>
             </div>
-            <ChatThread key={phone} phone={phone} perms={perms} onOpenOrder={onOpenOrder} />
+            <ChatThread key={phone} phone={phone} perms={perms} onOpenOrder={onOpenOrder} onRead={() => void list.reload()} />
           </>
         ) : (
           <div className="empty-state" style={{ height: '100%' }}>
