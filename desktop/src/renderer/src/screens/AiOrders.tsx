@@ -50,7 +50,7 @@ interface Order {
   review_note: string | null
   shop_updates?: ShopUpdate[]
   stage?: string
-  add_to_bill?: { invoice_id: string; number: string; order: string | null; possible: boolean; reason: string | null } | null
+  add_to_bill?: { invoice_id: string; number: string; order: string | null; mode?: string; changes?: string[]; possible: boolean; reason: string | null } | null
   lines?: Line[]
   questions?: string[]
   trace?: Record<string, unknown>[]
@@ -562,10 +562,23 @@ function OrderDetail({ id, state, onChanged, onDeleted }: { id: string; state: A
       {order.invoice && <div className="alert ok">Billed as {order.invoice.number} · {rs(order.invoice.total)}</div>}
       {order.status === 'rejected' && order.review_note && <div className="alert warn">{order.review_note.startsWith('Cancelled by the shop') ? order.review_note : `Rejected: ${order.review_note}`}</div>}
       {editable && order.add_to_bill && (
-        <div className={`alert ${order.add_to_bill.possible ? 'ok' : 'warn'}`}>
-          {order.add_to_bill.possible
-            ? `The shop asked to add these items to today's bill ${order.add_to_bill.number}. Approving adds them to that bill (same number) and sends the shop the updated bill.`
-            : `The shop asked to add these to bill ${order.add_to_bill.number}, but ${order.add_to_bill.reason}. Approving makes a separate bill.`}
+        <div className={`revision card ${order.add_to_bill.possible ? '' : 'blocked'}`}>
+          <div className="revision-head">
+            <span className="revision-ico"><Icon name="receipt" size={18} /></span>
+            <div>
+              <b>{order.add_to_bill.possible ? `Change to bill ${order.add_to_bill.number}` : `Bill ${order.add_to_bill.number} can no longer change`}</b>
+              <div className="muted small">
+                {order.add_to_bill.possible
+                  ? 'The shop asked to change a bill from the last business day. Approving revises that same bill and sends the shop the complete updated bill.'
+                  : `${order.add_to_bill.reason}. Approving makes a separate bill.`}
+              </div>
+            </div>
+          </div>
+          {order.add_to_bill.possible && (order.add_to_bill.changes?.length ?? 0) > 0 && (
+            <ul className="revision-list">
+              {order.add_to_bill.changes!.map((c, i) => <li key={i}>{c.replace(' -> ', ' → ')}</li>)}
+            </ul>
+          )}
         </div>
       )}
       {editable && (
@@ -577,7 +590,7 @@ function OrderDetail({ id, state, onChanged, onDeleted }: { id: string; state: A
           )}
           {can(perms, 'sales_order.approve') ? (
             <button className="btn primary big" disabled={busy || order.status !== 'draft_ready'} onClick={() => void approve()} title={order.status !== 'draft_ready' ? 'Fix the red lines first' : 'Create the bill'}>
-              {order.add_to_bill?.possible ? `Add to bill ${order.add_to_bill.number}` : 'Approve & create bill'}
+              {order.add_to_bill?.possible ? `Update bill ${order.add_to_bill.number}` : 'Approve & create bill'}
             </button>
           ) : (
             <span className="muted small">An approver must create the bill.</span>
