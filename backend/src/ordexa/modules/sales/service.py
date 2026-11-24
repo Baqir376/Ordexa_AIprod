@@ -285,11 +285,20 @@ def post_invoice(
 
 # ------------------------------------------------------------------ adding items to today's bill
 
-AMENDABLE_SOURCES = ("whatsapp_ai", "ai_manual")  # server-numbered W- bills; PC bills are printed at the counter
+AMENDABLE_SOURCES = ("whatsapp_ai", "ai_manual")
+
+
+def next_business_day(d):
+    """The next working day after ``d`` (Sunday is the weekly holiday in Pakistan)."""
+    from datetime import timedelta
+
+    n = d + timedelta(days=1)
+    return n + timedelta(days=1) if n.weekday() == 6 else n  # server-numbered W- bills; PC bills are printed at the counter
 
 
 def amend_blocker(session: Session, invoice: Invoice) -> str | None:
-    """Why this bill cannot take more items (None = it can): same business day, W-series, no returns against it."""
+    """Why this bill cannot be changed any more (None = it can): within one business day of the bill (the same day or
+    the next working day; Sunday is not a working day), W-series, no returns against it."""
     from ordexa.modules.finance.models import CreditNote
     from ordexa.modules.tenants.timeutil import business_today
 
@@ -297,8 +306,9 @@ def amend_blocker(session: Session, invoice: Invoice) -> str | None:
         return f"bill {invoice.number} is {invoice.status}"
     if invoice.source not in AMENDABLE_SOURCES:
         return f"bill {invoice.number} was made on a PC; only WhatsApp/AI bills can be added to"
-    if local_date(session, invoice.tenant_id, invoice.issued_at) != business_today(session, invoice.tenant_id):
-        return f"bill {invoice.number} is from an earlier day"
+    billed = local_date(session, invoice.tenant_id, invoice.issued_at)
+    if business_today(session, invoice.tenant_id) not in (billed, next_business_day(billed)):
+        return f"bill {invoice.number} is more than one business day old"
     if session.query(CreditNote.id).filter(CreditNote.invoice_id == invoice.id).first():
         return f"bill {invoice.number} already has a return / credit note"
     return None

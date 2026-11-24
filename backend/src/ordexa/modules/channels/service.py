@@ -418,8 +418,8 @@ def handle_inbound(
                 sender=to,
             )
             inbound.ai_order_id = req.id
-            correcting = conversation.is_bill_correction(t)
-            if created and (conversation.ADD.search(t) or conversation.SAME_BILL.search(t) or correcting):
+            intent = conversation.bill_intent(t)
+            if created and intent:
                 prev = session.scalar(
                     select(AiOrderRequest)
                     .where(
@@ -433,11 +433,11 @@ def handle_inbound(
                 )
                 bill = session.get(Invoice, prev.invoice_id) if prev is not None and prev.invoice_id else None
                 if bill is not None and sales.amend_blocker(session, bill) is None:
-                    # Same day, bill not returned: these items go into that bill when staff approve.
+                    # Within one business day, bill not returned: the same bill is revised when staff approve.
                     req.trace = (req.trace or []) + [
                         {
                             "step": "add_to_bill",
-                            "mode": "correct" if correcting and not conversation.ADD.search(t) else "add",
+                            "mode": intent,
                             "invoice_id": str(bill.id),
                             "number": bill.number,
                             "order": prev.number,

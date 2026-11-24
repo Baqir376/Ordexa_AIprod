@@ -551,10 +551,8 @@ def respond(session: Session, req: AiOrderRequest, ex: Extraction) -> None:
     for t in req.trace or []:
         if t.get("step") == "after_billed_order":
             prefix = f"Order {t['number']} ka bill ban chuka tha, is liye yeh naya order hai.\n"
-        if t.get("step") == "add_to_bill" and t.get("mode") != "correct":
-            prefix = f"Yeh items aap ke aaj ke bill {t['number']} mein add kar diye jayenge.\n"
-        if t.get("step") == "add_to_bill" and t.get("mode") == "correct":
-            body = _correction_reply(session, req, ex, t)
+        if t.get("step") == "add_to_bill":
+            body = _bill_change_reply(session, req, ex, t)
             if body:
                 _queue_reply(session, req, body)
                 return
@@ -624,20 +622,50 @@ def respond(session: Session, req: AiOrderRequest, ex: Extraction) -> None:
         _queue_reply(session, req, body)
 
 
-def _correction_reply(session: Session, req: AiOrderRequest, ex: Extraction, t: dict) -> str | None:
-    """The shop corrects today's bill. Without a product name ("instead of 10, I need 50") the line is found on the bill:
-    the one whose quantity was the first number, or the only line. Returns the reply, or None to treat it normally."""
+def bill_plan(req: AiOrderRequest, bill: Invoice, mode: str) -> tuple[dict, list[str], list[str]]:
+    """What the shop's message does to its bill: ({product_id: new quantity} for lines already on the bill,
+    [product ids to add as new lines], human-readable rows). add = more of an item or a new item; correct = set the
+    quantity; remove = take the item off (quantity 0)."""
     from ordexa.modules.ai import replies
 
+    on_bill = {ln.product_id: ln for ln in bill.lines}
+    set_qty: dict = {}
+    add: list[str] = []
+    rows: list[str] = []
+    for ln in req.lines:
+        if not ln.get("product_id"):
+            continue
+        pid = uuid.UUID(ln["product_id"])
+        old = on_bill.get(pid)
+        name = ln.get("product_name") or ln.get("phrase")
+        q = Decimal(str(ln.get("quantity") or 0))
+        unit = old.unit if old is not None else (ln.get("sale_unit") or ln.get("unit") or "")
+        if mode == "remove":
+            if old is not None:
+                set_qty[pid] = Decimal(0)
+                rows.append(f"{name}: hata diya jayega (pehle {replies.qty_text(old.quantity)} {unit})")
+        elif old is not None:
+            new = old.quantity + q if mode == "add" else q
+            set_qty[pid] = new
+            rows.append(f"{name}: {replies.qty_text(old.quantity)} -> {replies.qty_text(new)} {unit}".rstrip())
+        elif q > 0:
+            add.append(str(pid))
+            rows.append(f"{name}: {replies.qty_text(q)} {unit} (naya item)".rstrip())
+    return set_qty, add, rows
+
+
+def _bill_change_reply(session: Session, req: AiOrderRequest, ex: Extraction, t: dict) -> str | None:
+    """The shop changes a bill made within one business day. Builds what will change and answers the shop.
+    Without a product name ("instead of 10, I need 50") the line is found on the bill (the line with the first number,
+    or the only line). Returns None when nothing on the message maps to the bill (handled as a normal message)."""
     bill = session.get(Invoice, uuid.UUID(t["invoice_id"]))
     if bill is None:
         return None
-    if not any(ln.get("product_id") for ln in req.lines):
+    mode = t.get("mode") or "add"
+    if mode == "correct" and not any(ln.get("product_id") for ln in req.lines):
         nums = [Decimal(n) for n in re.findall(r"\d+(?:\.\d+)?", req.raw_text)]
         lines = sorted(bill.lines, key=lambda x: x.line_no)
-        target = None
-        if len(nums) >= 2:
-            target = next((ln for ln in lines if ln.quantity == nums[0]), None)
+        target = next((ln for ln in lines if len(nums) >= 2 and ln.quantity == nums[0]), None)
         if target is None and len(lines) == 1:
             target = lines[0]
         if target is None or not nums:
@@ -647,22 +675,36 @@ def _correction_reply(session: Session, req: AiOrderRequest, ex: Extraction, t: 
                     "unit": target.unit, "quantity_confirmed": True}}  # fmt: skip
         req.extraction = ex.model_dump()
         evaluate(session, req, ex, keep=keep)
-    on_bill = {str(ln.product_id): ln for ln in bill.lines}
-    rows = []
-    for ln in req.lines:
-        old = on_bill.get(str(ln.get("product_id")))
-        new = replies.qty_text(ln.get("quantity"))
-        unit = ln.get("unit") or ln.get("sale_unit") or ""
-        rows.append(
-            f"- {ln.get('product_name') or ln['phrase']}: {replies.qty_text(old.quantity)} -> {new} {unit}".rstrip()
-            if old is not None
-            else f"- {ln.get('product_name') or ln['phrase']}: {new} {unit} (naya item)".rstrip()
-        )
+    if mode == "remove":
+        # Only items that are on the bill matter, and no quantity is needed to remove them.
+        on_bill = {str(ln.product_id) for ln in bill.lines}
+        kept = [dict(ln, quantity=0, issues=[], line_total=None) for ln in req.lines if ln.get("product_id") in on_bill]
+        if not kept:
+            # "brufen nahi chahiye": match the words left after the remove words against the lines on the bill.
+            from ordexa.modules.ai.conversation import _strip_markers
+
+            words = [_strip_markers(req.raw_text)] + [ln.get("phrase") or "" for ln in req.lines]
+            for bl in bill.lines:
+                product = session.get(Product, bl.product_id)
+                if product is not None and max(score_product(w, product) for w in words if w) >= 0.6:
+                    kept.append({"line_no": len(kept) + 1, "phrase": bl.product_name, "product_id": str(bl.product_id),
+                                 "product_name": bl.product_name, "sale_unit": bl.unit, "unit": bl.unit, "quantity": 0,
+                                 "issues": [], "candidates": [], "resolution": "customer", "line_total": None})  # fmt: skip
+        if not kept:
+            return None
+        req.lines = kept
+        req.questions = []
+        req.warnings = [w for w in (req.warnings or []) if w.get("code") not in ("no_lines",)]
+        req.status = "draft_ready"
+    set_qty, add, rows = bill_plan(req, bill, mode)
+    if not rows and not (req.status == "needs_review" and req.questions):
+        return None
+    req.trace = (req.trace or []) + [{"step": "bill_plan", "mode": mode, "rows": rows}]
     q = first_question(req)
-    head = f"Theek hai, aap ke aaj ke bill {bill.number} mein yeh tabdeeli ki jayegi:\n" + "\n".join(rows)
+    head = f"Theek hai, aap ke bill {bill.number} mein yeh tabdeeli ki jayegi:\n" + "\n".join(f"- {r}" for r in rows)
     if req.status == "needs_review" and q:
-        return f"{head}\nPehle yeh bata dein:\n{q}"
-    return f"{head}\nHamari team confirm karke updated bill bhej degi."
+        return f"{head}\nPehle yeh bata dein:\n{q}" if rows else f"Bill {bill.number} ke liye pehle yeh bata dein:\n{q}"
+    return f"{head}\nHamari team confirm karke poora updated bill bhej degi."
 
 
 def _close(req: AiOrderRequest, note: str) -> None:
@@ -1228,9 +1270,7 @@ def approve(
     target = None if new_bill else add_to_bill_target(req)
     bill = session.get(Invoice, uuid.UUID(target["invoice_id"])) if target else None
     if bill is not None and bill.customer_id == req.customer_id and sales.amend_blocker(session, bill) is None:
-        if target.get("mode") == "correct":
-            return _approve_bill_correction(session, actor, req, bill, inv_lines)
-        return _approve_into_bill(session, actor, req, bill, inv_lines)
+        return _approve_bill_correction(session, actor, req, bill, inv_lines, target.get("mode") or "add")
     if target:  # the bill can no longer take items (next day, returned...): a separate bill, and say why
         why = sales.amend_blocker(session, bill) if bill is not None else "bill not found"
         req.trace = (req.trace or []) + [{"step": "add_to_bill_skipped", "reason": why or "staff chose a new bill"}]
@@ -1328,17 +1368,12 @@ def _approve_into_bill(
 
 
 def _approve_bill_correction(
-    session: Session, actor: Principal, req: AiOrderRequest, bill: Invoice, lines: list[sales.LineIn]
+    session: Session, actor: Principal, req: AiOrderRequest, bill: Invoice, lines: list[sales.LineIn], mode: str = "correct"
 ) -> tuple[AiOrderRequest, sales.PostResult]:
-    """Approve a shop's correction of today's bill: quantities of products already on it are set to the new amount,
-    other products are added. Same bill number; the shop gets the updated PDF."""
-    on_bill = {ln.product_id for ln in bill.lines}
-    set_qty: dict[uuid.UUID, Decimal] = {}
-    for ln in req.lines:
-        pid = uuid.UUID(ln["product_id"])
-        if pid in on_bill:
-            set_qty[pid] = Decimal(str(ln["quantity"]))
-    add = [ln for ln in lines if ln.product_id not in on_bill]
+    """Approve a shop's change to a recent bill (add, change or remove items): the same bill is revised in one go and
+    the shop gets the complete updated bill."""
+    set_qty, add_ids, _ = bill_plan(req, bill, mode)
+    add = [ln for ln in lines if str(ln.product_id) in add_ids]
     result, changes = sales.revise_bill(session, actor, bill, set_qty, add, note=f"corrected by the shop, order {req.number}")
     if result.status != "accepted":
         raise OrdexaError(ErrorCode.CONFLICT, f"could not change bill {bill.number}: {result.reason}")
@@ -1352,7 +1387,7 @@ def _approve_bill_correction(
     record(session, tenant_id=req.tenant_id, actor_user_id=actor.user_id, action="ai_order.approved", entity_type="ai_order",
            entity_id=req.id, data={"number": req.number, "invoice": bill.number, "bill_corrected": changes})  # fmt: skip
     if req.source == "whatsapp" and req.sender:
-        pretty = "\n".join(f"- {c.replace(' -> ', ' → ')}" for c in changes)
+        pretty = "\n".join(f"- {c.replace(' -> ', ' → ').replace(' -> 0 ', ' → hata diya ')}" for c in changes)
         enqueue(
             session,
             kind="whatsapp.send",
@@ -1363,7 +1398,7 @@ def _approve_bill_correction(
                 "to": req.sender,
                 "ref": bill.number,
                 "body": f"Aap ka bill {bill.number} update ho gaya:\n{pretty}\n"
-                f"Naya total: Rs {bill.total}. Updated bill attached hai.",
+                f"Naya total: Rs {bill.total}. Poora updated bill attached hai.",
                 "document": {"kind": "invoice", "invoice_id": str(bill.id), "filename": f"Bill-{bill.number}-updated.pdf"},
             },
         )

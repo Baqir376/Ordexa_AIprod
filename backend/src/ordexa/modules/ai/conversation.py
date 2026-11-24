@@ -84,6 +84,18 @@ MATCH_MIN = 0.6
 _NO = re.compile(_W.format(r"nahi|nahin|nai|no|not|wrong|galat|ghalat"), re.I)
 
 
+def bill_intent(text: str) -> str | None:
+    """What a message right after a bill wants done to it: "remove" an item, "add" items (or more of an item),
+    "correct" a quantity, or None (not about the bill)."""
+    if REMOVE.search(text) and not re.search(r"\d", text):
+        return "remove"
+    if ADD.search(text) or SAME_BILL.search(text):
+        return "add"
+    if is_bill_correction(text):
+        return "correct"
+    return None
+
+
 def is_bill_correction(text: str) -> bool:
     """ "10 ki jagah 50", "balkay 50 kar dein", "No, instead of 10, I need 50": a change to what was ordered, with a
     number in it."""

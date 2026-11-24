@@ -91,8 +91,9 @@ def _add_to_bill(session: Session, r: AiOrderRequest) -> dict | None:
         return None
     bill = session.get(Invoice, uuid.UUID(t["invoice_id"]))
     blocker = sales_service.amend_blocker(session, bill) if bill else "bill not found"
+    plan = service.bill_plan(r, bill, t.get("mode", "add"))[2] if bill and blocker is None else []
     return {"invoice_id": t["invoice_id"], "number": t["number"], "order": t.get("order"), "mode": t.get("mode", "add"),
-            "possible": blocker is None,
+            "changes": plan, "possible": blocker is None,
             "reason": blocker}  # fmt: skip
 
 

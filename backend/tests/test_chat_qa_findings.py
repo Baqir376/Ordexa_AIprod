@@ -160,7 +160,7 @@ def test_new_order_after_billed_one_says_why(make_biz):
     say(biz, "5 botal calpol")
     approve_latest(biz)
     r = chat(biz, "2 box ORS bhi add kar do")
-    assert "aaj ke bill W-000001 mein add kar diye jayenge" in r  # same day: joins that bill (see test_add_to_bill)
+    assert "bill W-000001 mein yeh tabdeeli" in r  # same day: the same bill is revised (see test_add_to_bill)
 
 
 # ---------------------------------------------------------------- sign-up
