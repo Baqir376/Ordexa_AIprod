@@ -293,12 +293,12 @@ def test_connection(p: Principal = Depends(requires("integration.configure")), s
     if n is not None and n.waba_id:
         # Known Meta quirk: the webhook verifies fine but no messages arrive until the app is subscribed to the WABA.
         try:
+            # Always subscribe *this* app (idempotent). Another app being subscribed (e.g. Meta's dashboard test-webhook
+            # app) is not enough: messages then go to that app, not to Ordexa.
+            service.graph_request(creds, "POST", f"{n.waba_id}/subscribed_apps", {})
             subs = service.graph_request(creds, "GET", f"{n.waba_id}/subscribed_apps").get("data", [])
-            if subs:
-                sub_note = " Your app is subscribed to receive messages."
-            else:
-                service.graph_request(creds, "POST", f"{n.waba_id}/subscribed_apps", {})
-                sub_note = " Your app was not subscribed to this WhatsApp account; it is now, so messages will arrive."
+            names = ", ".join((a.get("whatsapp_business_api_data") or {}).get("name", "?") for a in subs)
+            sub_note = f" Your app is subscribed to receive messages (subscribed apps: {names})."
         except Exception as exc:  # noqa: BLE001
             sub_note = f" Could not check the app subscription: {exc}"
     else:

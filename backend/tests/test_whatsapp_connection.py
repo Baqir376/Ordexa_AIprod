@@ -208,7 +208,7 @@ def test_test_button_subscribes_the_app_to_the_whatsapp_account(make_biz, meta):
     biz = make_biz()
     biz.put("/api/v1/channels/whatsapp/connection", json={**CONN, "waba_id": "555000111222333"})
     r = biz.post("/api/v1/channels/whatsapp/connection/test").json()
-    assert r["ok"] and "it is now" in r["message"]
+    assert r["ok"] and "is subscribed" in r["message"]
     assert any(c["method"] == "POST" and c["url"].endswith("/555000111222333/subscribed_apps") for c in meta.calls)
     r = biz.post("/api/v1/channels/whatsapp/connection/test").json()
     assert "is subscribed" in r["message"]
