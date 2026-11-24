@@ -84,7 +84,7 @@ INJECTION_PATTERNS: list[tuple[str, re.Pattern]] = [
     (
         "pricing",
         re.compile(
-            r"(rs\.?|rupees?)\s*\d+\s*(wala|wali|ka|ki|per|mein|me)?\s*(rate|price|qeemat)|rate\s+(lagana|lagao|laga\s+do|de\s+do|kar\s+do)|(apna|meri|mera)\s+rate",
+            r"\b(rs\.?|rupees?)\s*\d+\s*(wala|wali|ka|ki|per|mein|me)?\s*(rate|price|qeemat)|\brate\s+(lagana|lagao|laga\s+do|de\s+do|kar\s+do)|\b(apna|meri|mera)\s+rate\b",
             re.I,
         ),
     ),

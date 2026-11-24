@@ -11,7 +11,7 @@ import hashlib
 import logging
 import re
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from difflib import SequenceMatcher
 
@@ -38,6 +38,7 @@ from ordexa.modules.inventory.models import InventoryTransaction
 from ordexa.modules.jobs.service import enqueue
 from ordexa.modules.sales import service as sales
 from ordexa.modules.tenants.models import Warehouse
+from ordexa.modules.tenants.timeutil import business_today
 from ordexa.shared.errors import ErrorCode, OrdexaError
 from ordexa.shared.money import line_total, money, qty
 from ordexa.shared.sequences import next_number
@@ -121,7 +122,7 @@ def _fefo_batches(
             Batch.tenant_id == tenant_id,
             Batch.product_id == product_id,
             Batch.is_active.is_(True),
-            (Batch.expiry_date.is_(None)) | (Batch.expiry_date > date.today()),
+            (Batch.expiry_date.is_(None)) | (Batch.expiry_date > business_today(session, tenant_id)),
         )
         .group_by(Batch.id)
         .order_by(Batch.expiry_date.nulls_last(), Batch.batch_no)

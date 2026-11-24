@@ -21,6 +21,7 @@ from ordexa.modules.inventory import service as inventory
 from ordexa.modules.purchasing.models import Supplier
 from ordexa.modules.sales.models import Invoice
 from ordexa.modules.tenants.models import Warehouse
+from ordexa.modules.tenants.timeutil import business_today
 from ordexa.shared.errors import ErrorCode, OrdexaError
 from ordexa.shared.money import line_total, money, qty
 from ordexa.shared.sequences import next_number
@@ -191,7 +192,7 @@ def record_payment(
         raise OrdexaError(ErrorCode.VALIDATION_ERROR, "cheque number is required")
     party_type = "customer" if data.direction == "in" else "supplier"
     party = _party(session, actor.tenant_id, party_type, data.party_id)
-    when = data.payment_date or date.today()
+    when = data.payment_date or business_today(session, actor.tenant_id)
     p = Payment(
         id=data.id,
         tenant_id=actor.tenant_id,
@@ -260,7 +261,7 @@ def set_cheque_status(session: Session, actor: Principal, payment_id: uuid.UUID,
             kind="cheque_bounced",
             source_id=p.id,
             reference=p.number,
-            entry_date=date.today(),
+            entry_date=business_today(session, p.tenant_id),
             memo=f"cheque #{p.cheque_no} bounced",
         )
     record(
@@ -322,7 +323,7 @@ def create_credit_note(
         customer_id=customer.id,
         invoice_id=invoice_id,
         warehouse_id=wh.id,
-        note_date=date.today(),
+        note_date=business_today(session, actor.tenant_id),
         reason=reason.strip(),
         total=Decimal(0),
         created_by=actor.user_id,
@@ -417,7 +418,7 @@ def record_expense(
         tenant_id=actor.tenant_id,
         category=category.strip()[:60],
         amount=money(amount),
-        expense_date=expense_date or date.today(),
+        expense_date=expense_date or business_today(session, actor.tenant_id),
         method=method,
         note=note,
         created_by=actor.user_id,

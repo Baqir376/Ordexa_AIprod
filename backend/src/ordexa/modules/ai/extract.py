@@ -385,6 +385,8 @@ Messages may be English, Urdu, Roman Urdu, or a mix, with spelling mistakes, bra
 
 Extract every ordered item as a line:
 - phrase: the product exactly as the customer wrote it (fix nothing, translate nothing), without quantity or unit words.
+  Keep every word that names the product or its variant: strength and type words such as extra, forte, plus,
+  syrup, drops, 500, 625mg are part of the phrase ("panadol extra", not "panadol").
 - quantity: the number asked for (Urdu/Roman Urdu number words count: do=2, teen=3, das=10...). null if not stated.
 - unit: normalise Roman Urdu units: dabba/dibba -> box, patta/patti -> strip, peti/cartoon -> carton, botal/shishi -> bottle,
   goli -> tablet, adad -> piece. null if not stated. Never convert between units.

@@ -21,6 +21,7 @@ from ordexa.modules.finance.service import balance, post_ledger
 from ordexa.modules.identity.service import Principal
 from ordexa.modules.inventory import service as inventory
 from ordexa.modules.sales.models import Invoice, InvoiceLine
+from ordexa.modules.tenants.timeutil import local_date
 from ordexa.shared.money import line_total, money, qty
 
 
@@ -240,7 +241,7 @@ def post_invoice(
                 }
             )
     if customer:
-        day = inv.issued_at.date()
+        day = local_date(session, principal.tenant_id, inv.issued_at)  # business date, not UTC
         post_ledger(
             session,
             tenant_id=principal.tenant_id,

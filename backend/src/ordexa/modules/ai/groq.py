@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -28,6 +29,16 @@ STT_PROMPT = (
 )
 
 
+MAX_RETRY_WAIT = 10.0  # seconds
+
+
+def _retry_after(value: str | None) -> float | None:
+    try:
+        return max(float(value), 0.5) if value is not None else None
+    except ValueError:
+        return None
+
+
 def configured() -> bool:
     """A Groq key is set and AI is not switched off (ORDEXA_AI_PROVIDER=rules)."""
     s = get_settings()
@@ -38,7 +49,7 @@ def _headers(content_type: str) -> dict:
     return {"Authorization": f"Bearer {get_settings().groq_api_key}", "Content-Type": content_type, "User-Agent": "ordexa-erp"}
 
 
-def _post(path: str, body: bytes, content_type: str, timeout: int = 60) -> dict:
+def _post(path: str, body: bytes, content_type: str, timeout: int = 60, _retry: bool = True) -> dict:
     req = urllib.request.Request(f"{API}{path}", data=body, method="POST", headers=_headers(content_type))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 - fixed https API base
@@ -46,6 +57,11 @@ def _post(path: str, body: bytes, content_type: str, timeout: int = 60) -> dict:
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:300]
         if e.code == 429:
+            # Free tier: per-minute token limits. Wait once if Groq says it is short, else let callers fall back.
+            wait = _retry_after(e.headers.get("retry-after"))
+            if _retry and wait is not None and wait <= MAX_RETRY_WAIT:
+                time.sleep(wait)
+                return _post(path, body, content_type, timeout, _retry=False)
             raise RuntimeError(f"Groq free-tier rate limit reached; try again shortly ({detail})") from e
         raise RuntimeError(f"Groq API error {e.code}: {detail}") from e
     except urllib.error.URLError as e:

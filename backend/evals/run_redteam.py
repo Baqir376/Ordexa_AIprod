@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -36,6 +37,7 @@ def main() -> int:
     ap.add_argument("--business", required=True)
     ap.add_argument("--password", required=True)
     ap.add_argument("--phone", default="+923001110102", help="a shop number on file (demo shop 102)")
+    ap.add_argument("--delay", type=float, default=8.0, help="seconds between cases (free-tier rate limits)")
     args = ap.parse_args()
 
     def call(method, path, body=None, token=None):
@@ -62,7 +64,9 @@ def main() -> int:
         say(m)
     cases = json.loads((Path(__file__).parent / "redteam_cases.json").read_text(encoding="utf-8"))
     failures = 0
-    for case in cases:
+    for i, case in enumerate(cases):
+        if i:
+            time.sleep(args.delay)
         r = say(case["text"])
         if not r.get("ai_order"):
             print(f"FAIL {case['id']}: no order created ({r.get('bot_replies')})")

@@ -3,6 +3,7 @@
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from tests.conftest import PASSWORD
 
@@ -214,8 +215,8 @@ def test_reports_dashboard_low_stock_expiry_profit(make_biz):
     assert Decimal(low["P007"]["suggested_order"]) == 35  # 2 x reorder level (40) - on hand (5) > 30-day sales - on hand
     exp = biz.get("/api/v1/reports/expiry?days=90").json()
     assert all(r["days_left"] <= 90 for r in exp) and any(r["batch_no"] == "BF2311" for r in exp)
-    today = date.today().isoformat()
-    prof = biz.get(f"/api/v1/reports/profit?start={date.today().replace(day=1).isoformat()}&end={today}").json()
+    pk_today = datetime.now(ZoneInfo("Asia/Karachi")).date()  # business date, not the server's UTC date
+    prof = biz.get(f"/api/v1/reports/profit?start={pk_today.replace(day=1).isoformat()}&end={pk_today.isoformat()}").json()
     # cost = 85% of price in the demo seed: 3,230.00 + 14,662.50
     assert prof["sales"] == "21050.00" and prof["cost_of_goods"] == "17892.50" and prof["net_profit"] == "2157.50"
 
@@ -246,3 +247,33 @@ def test_backup_exports_everything_but_secrets(make_biz):
     other = make_biz("other-pharma", "Other")
     r = other.get("/api/v1/backup/export").json()
     assert r["tables"]["invoices"] == [], r
+
+
+def test_bill_just_after_midnight_in_pakistan_gets_the_pakistan_date(make_biz):
+    """00:30 in Karachi is 19:30 UTC the previous day: the ledger and reports must use the Karachi date."""
+    biz = make_biz()
+    dev, products, batches, customers, _ = _setup(biz)
+    shop = customers["101"]
+    inv = {
+        "id": str(uuid.uuid4()),
+        "number": "T1-000001",
+        "customer_id": shop["id"],
+        "issued_at": "2026-11-23T19:30:00+00:00",
+        "lines": [
+            {
+                "line_no": 1,
+                "product_id": products["P001"]["id"],
+                "batch_id": batches["PN2407"]["id"],
+                "quantity": "1",
+                "unit_price": products["P001"]["sale_price"],
+            }
+        ],
+    }
+    assert (
+        biz.post("/api/v1/sync/push", json={"invoices": [inv]}, headers=biz.dev_headers(dev)).json()["results"][0]["status"]
+        == "accepted"
+    )
+    entry = biz.get(f"/api/v1/ledger/customer/{shop['id']}").json()["entries"][0]
+    assert entry["date"] == "2026-11-24"
+    day = biz.get("/api/v1/reports/sales-by-day?start=2026-11-24&end=2026-11-24").json()
+    assert day[0]["invoices"] == 1

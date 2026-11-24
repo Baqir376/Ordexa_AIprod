@@ -22,8 +22,10 @@ import type {
 
 const NEAR_EXPIRY_DAYS = 90
 
+/** Local calendar date on this PC (expiry is a local date), not the UTC date. */
 function today(): string {
-  return new Date().toISOString().slice(0, 10)
+  const d = new Date()
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 10)
 }
 
 function addDays(iso: string, days: number): string {

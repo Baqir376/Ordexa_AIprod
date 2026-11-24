@@ -19,6 +19,7 @@ from ordexa.modules.inventory.models import InventoryTransaction
 from ordexa.modules.purchasing.models import PurchaseInvoice
 from ordexa.modules.sales.models import Invoice, InvoiceLine
 from ordexa.modules.tenants.models import Tenant
+from ordexa.modules.tenants.timeutil import business_today
 from ordexa.shared.db import get_session
 from ordexa.shared.money import money, qty
 
@@ -206,11 +207,12 @@ def stock(
 @router.get("/expiry")
 def expiry(days: int = 90, p: Principal = Depends(requires("inventory.view")), session: Session = Depends(get_session)):
     """Batches with stock that are expired or expire within ``days`` (expiry intimation)."""
-    limit = date.today() + timedelta(days=days)
+    today = business_today(session, p.tenant_id)
+    limit = today + timedelta(days=days)
     out = []
     for r in stock(p=p, session=session):
         if r["expiry_date"] and Decimal(r["on_hand"]) > 0 and date.fromisoformat(r["expiry_date"]) <= limit:
-            d = (date.fromisoformat(r["expiry_date"]) - date.today()).days
+            d = (date.fromisoformat(r["expiry_date"]) - today).days
             out.append({**r, "days_left": d, "expired": d <= 0})
     return sorted(out, key=lambda r: r["days_left"])
 

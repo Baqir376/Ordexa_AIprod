@@ -6,7 +6,11 @@ import { formatRs, toPaisa } from '../../core/money'
 import { ordexa } from './bridge'
 
 export const uid = (): string => crypto.randomUUID()
-export const today = (): string => new Date().toISOString().slice(0, 10)
+/** Local calendar date on this PC (Pakistan time), not the UTC date. */
+export const today = (): string => {
+  const d = new Date()
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 10)
+}
 
 /** Format a server decimal string ("1234.50") as "Rs 1,234.50". */
 export function rs(v: string | number | null | undefined): string {

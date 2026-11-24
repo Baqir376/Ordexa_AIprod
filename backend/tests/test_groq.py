@@ -132,3 +132,33 @@ def test_rate_limit_falls_back_to_rules_and_voice_waits_for_staff(make_biz, fake
     ).json()
     assert v["status"] == "needs_review" and any(w["code"] == "voice_note" for w in v["warnings"])
     assert "error" in v["trace"][0]
+
+
+def test_short_rate_limit_waits_and_retries_once(monkeypatch):
+    import io
+    import urllib.error
+
+    calls = {"n": 0}
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=60):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {"retry-after": "0.01"}, io.BytesIO(b"{}"))
+        return Resp(b'{"ok": true}')
+
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(groq.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(groq.time, "sleep", lambda s: None)
+    try:
+        assert groq._post("/chat/completions", b"{}", "application/json") == {"ok": True}
+        assert calls["n"] == 2
+    finally:
+        get_settings.cache_clear()

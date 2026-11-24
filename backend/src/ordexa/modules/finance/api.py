@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ordexa.modules.finance import service
 from ordexa.modules.finance.models import CreditNote, Expense, Payment
 from ordexa.modules.identity.service import Principal, current_principal, requires
+from ordexa.modules.tenants.timeutil import business_today
 from ordexa.shared.db import get_session
 from ordexa.shared.errors import ErrorCode, OrdexaError
 
@@ -137,7 +138,7 @@ def ledger(
 def aging(party_type: str, p: Principal = Depends(requires("finance.view")), session: Session = Depends(get_session)):
     if party_type not in ("customer", "supplier"):
         raise OrdexaError(ErrorCode.VALIDATION_ERROR, "party_type must be customer or supplier")
-    return service.aging(session, p.tenant_id, party_type, date.today())
+    return service.aging(session, p.tenant_id, party_type, business_today(session, p.tenant_id))
 
 
 @router.get("/credit-notes")
