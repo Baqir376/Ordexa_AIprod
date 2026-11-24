@@ -75,7 +75,15 @@ async def receive(request: Request):
         for n in session.scalars(select(WhatsappNumber).where(WhatsappNumber.phone_number_id.in_([i for i in ids if i]))):
             secrets.append(decrypt(n.app_secret_enc))
         if not any(sec and valid_signature(raw, header, sec) for sec in secrets):
-            return JSONResponse({"error": "invalid signature"}, status_code=401)
+            # Unknown number (e.g. Meta's "Test" button sends a sample number): try every saved app secret.
+            others = [
+                decrypt(x)
+                for x in session.scalars(select(WhatsappNumber.app_secret_enc).where(WhatsappNumber.app_secret_enc.is_not(None)))
+            ]
+            if not any(sec and valid_signature(raw, header, sec) for sec in others):
+                log.warning("webhook rejected: signature does not match any saved app secret")
+                return JSONResponse({"error": "invalid signature"}, status_code=401)
+            log.info("webhook for unknown phone_number_id %s accepted (Meta test event?)", ids)
     enqueued = 0
     with get_sessionmaker()() as session:
         for entry in payload.get("entry") or []:

@@ -23,6 +23,7 @@ class WhatsappNumber(Base):
     app_secret_enc: Mapped[str | None] = mapped_column(Text)
     verify_token: Mapped[str | None] = mapped_column(String(80))
     public_url: Mapped[str | None] = mapped_column(String(300))  # where Meta reaches this server (tunnel or host)
+    waba_id: Mapped[str | None] = mapped_column(String(40))  # WhatsApp Business Account ID (to subscribe the app)
     last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

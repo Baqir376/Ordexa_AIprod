@@ -29,6 +29,7 @@ class FakeMeta:
     def __init__(self):
         self.calls = []
         self.fail_with = None
+        self.subscribed = []
 
     def __call__(self, req, timeout=20):
         self.calls.append(
@@ -45,7 +46,12 @@ class FakeMeta:
             raise urllib.error.HTTPError(
                 req.full_url, self.fail_with, "err", {}, io.BytesIO(b'{"error":{"message":"Invalid OAuth access token"}}')
             )
-        if req.get_method() == "GET":
+        if req.full_url.endswith("/subscribed_apps") and req.get_method() == "GET":
+            body = {"data": self.subscribed}
+        elif req.full_url.endswith("/subscribed_apps"):
+            self.subscribed = [{"whatsapp_business_api_data": {"name": "Ordexa"}}]
+            body = {"success": True}
+        elif req.get_method() == "GET":
             body = {"display_phone_number": "+1 555-0100", "verified_name": "Test Number", "id": "123456789012345"}
         else:
             body = {"messages": [{"id": "wamid.OUT1"}]}
@@ -196,3 +202,48 @@ def test_disconnect_falls_back_to_simulation(make_biz):
     biz.put("/api/v1/channels/whatsapp/connection", json=CONN)
     r = biz.client.delete("/api/v1/channels/whatsapp/connection", headers=biz.headers).json()
     assert r["connected"] is False and not r["has_access_token"]
+
+
+def test_test_button_subscribes_the_app_to_the_whatsapp_account(make_biz, meta):
+    biz = make_biz()
+    biz.put("/api/v1/channels/whatsapp/connection", json={**CONN, "waba_id": "555000111222333"})
+    r = biz.post("/api/v1/channels/whatsapp/connection/test").json()
+    assert r["ok"] and "it is now" in r["message"]
+    assert any(c["method"] == "POST" and c["url"].endswith("/555000111222333/subscribed_apps") for c in meta.calls)
+    r = biz.post("/api/v1/channels/whatsapp/connection/test").json()
+    assert "is subscribed" in r["message"]
+
+
+def test_meta_test_event_with_sample_number_is_accepted(make_biz):
+    from ordexa.apps.webhook import app
+
+    biz = make_biz()
+    biz.put("/api/v1/channels/whatsapp/connection", json=CONN)
+    body = json.dumps(
+        {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "field": "messages",
+                            "value": {
+                                "metadata": {"phone_number_id": "123456123"},
+                                "messages": [
+                                    {
+                                        "id": "wamid.SAMPLE",
+                                        "from": "16315551181",
+                                        "type": "text",
+                                        "text": {"body": "this is a text message"},
+                                    }
+                                ],
+                            },
+                        }
+                    ]
+                }
+            ],
+        }
+    ).encode()
+    sig = "sha256=" + hmac.new(b"meta-app-secret", body, hashlib.sha256).hexdigest()
+    r = TestClient(app).post("/webhooks/whatsapp", content=body, headers={"x-hub-signature-256": sig})
+    assert r.status_code == 200

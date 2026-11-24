@@ -190,6 +190,7 @@ class ConnectionIn(BaseModel):
     app_secret: str | None = Field(default=None, max_length=200)  # omitted = keep the saved one
     verify_token: str | None = Field(default=None, max_length=80)
     public_url: str | None = Field(default=None, max_length=300)
+    waba_id: str | None = Field(default=None, max_length=40, pattern=r"^\d*$")
 
 
 class SendTestIn(BaseModel):
@@ -217,6 +218,7 @@ def connection_out(n: WhatsappNumber | None) -> dict:
         "has_app_secret": bool(n.app_secret_enc),
         "verify_token": n.verify_token,
         "public_url": n.public_url,
+        "waba_id": n.waba_id,
         "webhook_path": WEBHOOK_PATH,
         "webhook_url": f"{base}{WEBHOOK_PATH}" if base else None,
         "last_inbound_at": n.last_inbound_at.isoformat() if n.last_inbound_at else None,
@@ -248,6 +250,8 @@ def save_connection(
     if body.app_secret:
         n.app_secret_enc = encrypt(body.app_secret.strip())
     n.verify_token = (body.verify_token or "").strip() or n.verify_token or secrets.token_urlsafe(24)
+    if body.waba_id is not None:
+        n.waba_id = body.waba_id.strip() or None
     if body.public_url is not None:
         url = body.public_url.strip().rstrip("/")
         if url and not url.startswith("https://"):
@@ -285,9 +289,23 @@ def test_connection(p: Principal = Depends(requires("integration.configure")), s
         n.display_phone = info.get("display_phone_number") or n.display_phone
         n.last_error = None
         session.commit()
+    sub_note = ""
+    if n is not None and n.waba_id:
+        # Known Meta quirk: the webhook verifies fine but no messages arrive until the app is subscribed to the WABA.
+        try:
+            subs = service.graph_request(creds, "GET", f"{n.waba_id}/subscribed_apps").get("data", [])
+            if subs:
+                sub_note = " Your app is subscribed to receive messages."
+            else:
+                service.graph_request(creds, "POST", f"{n.waba_id}/subscribed_apps", {})
+                sub_note = " Your app was not subscribed to this WhatsApp account; it is now, so messages will arrive."
+        except Exception as exc:  # noqa: BLE001
+            sub_note = f" Could not check the app subscription: {exc}"
+    else:
+        sub_note = " (Add the WhatsApp Business Account ID to also check that messages will be delivered.)"
     return {
         "ok": True,
-        "message": f"Connected to {info.get('display_phone_number')} ({info.get('verified_name')})",
+        "message": f"Connected to {info.get('display_phone_number')} ({info.get('verified_name')}).{sub_note}",
         "display_phone": info.get("display_phone_number"),
         "verified_name": info.get("verified_name"),
     }

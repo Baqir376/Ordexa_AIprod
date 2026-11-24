@@ -13,6 +13,7 @@ interface Connection {
   has_app_secret?: boolean
   verify_token?: string | null
   public_url?: string | null
+  waba_id?: string | null
   webhook_url?: string | null
   webhook_path: string
   last_inbound_at?: string | null
@@ -30,7 +31,7 @@ function Copy({ value }: { value: string }) {
 
 export function WhatsAppConnectionCard() {
   const [conn, setConn] = useState<Connection | null>(null)
-  const [f, setF] = useState({ phone_number_id: '', access_token: '', app_secret: '', public_url: '' })
+  const [f, setF] = useState({ phone_number_id: '', access_token: '', app_secret: '', public_url: '', waba_id: '' })
   const [testTo, setTestTo] = useState('')
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [showSteps, setShowSteps] = useState(false)
@@ -39,7 +40,7 @@ export function WhatsAppConnectionCard() {
   async function load() {
     const c = await ordexa().request<Connection>('GET', '/api/v1/channels/whatsapp/connection')
     setConn(c)
-    setF((cur) => ({ ...cur, phone_number_id: c.phone_number_id ?? '', public_url: c.public_url ?? '', access_token: '', app_secret: '' }))
+    setF((cur) => ({ ...cur, phone_number_id: c.phone_number_id ?? '', public_url: c.public_url ?? '', waba_id: c.waba_id ?? '', access_token: '', app_secret: '' }))
     if (!c.connected) setShowSteps(true)
   }
   useEffect(() => {
@@ -48,7 +49,7 @@ export function WhatsAppConnectionCard() {
 
   async function save() {
     setResult(null)
-    const body: Record<string, string> = { phone_number_id: f.phone_number_id.trim(), public_url: f.public_url.trim() }
+    const body: Record<string, string> = { phone_number_id: f.phone_number_id.trim(), public_url: f.public_url.trim(), waba_id: f.waba_id.trim() }
     if (f.access_token.trim()) body.access_token = f.access_token.trim()
     if (f.app_secret.trim()) body.app_secret = f.app_secret.trim()
     const c = await run(() => ordexa().request<Connection>('PUT', '/api/v1/channels/whatsapp/connection', body))
@@ -92,7 +93,7 @@ export function WhatsAppConnectionCard() {
       {showSteps && (
         <ol className="steps small">
           <li>Open <b>developers.facebook.com</b> → <b>My Apps → Create App</b> (type <i>Business</i>) → add the <b>WhatsApp</b> product.</li>
-          <li>In <b>WhatsApp → API Setup</b>: copy the <b>Phone number ID</b> and the <b>access token</b>. Under <b>To</b>, add the phones you will test from (up to 5).</li>
+          <li>In <b>WhatsApp → API Setup</b>: copy the <b>Phone number ID</b>, the <b>WhatsApp Business Account ID</b> and the <b>access token</b>. Under <b>To</b>, add the phones you will test from (up to 5).</li>
           <li>In <b>App settings → Basic</b>: copy the <b>App secret</b>.</li>
           <li>Make this server reachable from the internet: run <code>scripts\start-tunnel.ps1</code> on this PC and paste the <code>https://…trycloudflare.com</code> address below (or your Render address after deploying).</li>
           <li>Fill the fields below and press <b>Save</b>, then <b>Test connection</b>.</li>
@@ -109,6 +110,9 @@ export function WhatsAppConnectionCard() {
           <input value={f.public_url} onChange={(e) => setF({ ...f, public_url: e.target.value })} placeholder="https://xxxx.trycloudflare.com" />
         </Field>
       </div>
+      <Field label="WhatsApp Business Account ID (from API Setup; lets 'Test connection' make sure messages are delivered)">
+        <input value={f.waba_id} onChange={(e) => setF({ ...f, waba_id: e.target.value })} placeholder="e.g. 102290129340398" />
+      </Field>
       <div className="row-2">
         <Field label={`Access token ${conn?.has_access_token ? '(saved; leave empty to keep)' : ''}`}>
           <input type="password" autoComplete="off" value={f.access_token} onChange={(e) => setF({ ...f, access_token: e.target.value })} placeholder={conn?.has_access_token ? '••••••••' : 'EAAG…'} />
