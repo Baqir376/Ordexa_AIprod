@@ -909,7 +909,8 @@ def approve(
                 "to": req.sender,
                 "ref": result.number,
                 "body": f"Order {req.number} confirm ho gaya. Bill {result.number}: Rs {result.total}. "
-                f"Shukriya! / Your order is confirmed.",
+                f"Bill attached hai. Shukriya! / Your order is confirmed, bill attached.",
+                "document": {"kind": "invoice", "invoice_id": str(inv_id), "filename": f"Bill-{result.number}.pdf"},
             },
         )
     return req, result

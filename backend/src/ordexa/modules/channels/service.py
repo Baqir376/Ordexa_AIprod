@@ -129,13 +129,78 @@ def send_job(session: Session, job: Job) -> None:
             msg.status, msg.error = "failed", "outside the 24-hour reply window; an approved template is required"
         else:
             try:
-                msg.wamid = _cloud_send(creds, p["to"], p["body"], p.get("template"))
+                doc = _document(session, p.get("document"))
+                if doc is not None:
+                    try:
+                        msg.wamid = _cloud_send_document(creds, p["to"], *doc, caption=p["body"])
+                        msg.body = f"[PDF: {doc[1]}] {p['body']}"
+                    except PermanentSendError as exc:  # document refused: still tell the customer in text
+                        log.warning("sending bill PDF failed, sending text instead: %s", exc)
+                        msg.wamid = _cloud_send(creds, p["to"], p["body"], None)
+                else:
+                    msg.wamid = _cloud_send(creds, p["to"], p["body"], p.get("template"))
                 msg.status = "sent"
             except PermanentSendError as exc:  # e.g. bad token, number not allowed: record it, don't retry forever
                 msg.status, msg.error = "failed", str(exc)[:500]
                 if creds.number is not None:
                     creds.number.last_error = str(exc)[:500]
+    elif p.get("document"):
+        msg.body = f"[PDF: {p['document'].get('filename', 'bill.pdf')}] {p['body']}"
     session.add(msg)
+
+
+def _document(session: Session, spec: dict | None) -> tuple[bytes, str] | None:
+    """Render the attachment named in an outbox job (currently: a bill PDF)."""
+    if not spec or spec.get("kind") != "invoice":
+        return None
+    from ordexa.modules.sales.models import Invoice
+    from ordexa.modules.sales.receipt import invoice_pdf
+
+    inv = session.get(Invoice, uuid.UUID(spec["invoice_id"]))
+    if inv is None:
+        return None
+    return invoice_pdf(session, inv), spec.get("filename") or f"Bill-{inv.number}.pdf"
+
+
+def _upload_media(creds: Creds, data: bytes, filename: str, mime: str) -> str:
+    """Upload a file to the Cloud API (multipart) and return its media id."""
+    boundary = "ordexa" + uuid.uuid4().hex
+    parts = [
+        f'--{boundary}\r\nContent-Disposition: form-data; name="messaging_product"\r\n\r\nwhatsapp\r\n'.encode(),
+        f'--{boundary}\r\nContent-Disposition: form-data; name="type"\r\n\r\n{mime}\r\n'.encode(),
+        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: {mime}\r\n\r\n".encode()
+        + data
+        + b"\r\n",
+        f"--{boundary}--\r\n".encode(),
+    ]
+    req = urllib.request.Request(
+        f"{get_settings().whatsapp_api_base}/{creds.phone_number_id}/media",
+        data=b"".join(parts),
+        method="POST",
+        headers={"Authorization": f"Bearer {creds.token}", "Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:  # noqa: S310 - fixed https Graph API base
+            return json.loads(r.read())["id"]
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:400]
+        if e.code == 429 or e.code >= 500:
+            raise RuntimeError(f"WhatsApp media upload {e.code}: {detail}") from e
+        raise PermanentSendError(f"WhatsApp media upload {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"WhatsApp API unreachable: {e.reason}") from e
+
+
+def _cloud_send_document(creds: Creds, to: str, data: bytes, filename: str, caption: str) -> str:
+    media_id = _upload_media(creds, data, filename, "application/pdf")
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to.lstrip("+"),
+        "type": "document",
+        "document": {"id": media_id, "filename": filename, "caption": caption[:1024]},
+    }
+    return graph_request(creds, "POST", f"{creds.phone_number_id}/messages", payload)["messages"][0]["id"]
 
 
 class PermanentSendError(RuntimeError):

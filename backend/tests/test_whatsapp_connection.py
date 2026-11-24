@@ -30,6 +30,8 @@ class FakeMeta:
         self.calls = []
         self.fail_with = None
         self.subscribed = []
+        self.fail_media = False
+        self.sent = 0
 
     def __call__(self, req, timeout=20):
         self.calls.append(
@@ -37,7 +39,8 @@ class FakeMeta:
                 "url": req.full_url,
                 "method": req.get_method(),
                 "auth": req.get_header("Authorization"),
-                "body": json.loads(req.data) if req.data else None,
+                "body": (json.loads(req.data) if req.data and not req.full_url.endswith("/media") else None),
+                "raw": req.data,
             }
         )
         if self.fail_with:
@@ -51,10 +54,17 @@ class FakeMeta:
         elif req.full_url.endswith("/subscribed_apps"):
             self.subscribed = [{"whatsapp_business_api_data": {"name": "Ordexa"}}]
             body = {"success": True}
+        elif req.full_url.endswith("/media"):
+            if self.fail_media:
+                import urllib.error
+
+                raise urllib.error.HTTPError(req.full_url, 400, "err", {}, io.BytesIO(b'{"error":{"message":"bad"}}'))
+            body = {"id": "MEDIA-1"}
         elif req.get_method() == "GET":
             body = {"display_phone_number": "+1 555-0100", "verified_name": "Test Number", "id": "123456789012345"}
         else:
-            body = {"messages": [{"id": "wamid.OUT1"}]}
+            self.sent += 1
+            body = {"messages": [{"id": f"wamid.OUT{self.sent}"}]}
 
         class R(io.BytesIO):
             def __enter__(self):
@@ -247,3 +257,70 @@ def test_meta_test_event_with_sample_number_is_accepted(make_biz):
     sig = "sha256=" + hmac.new(b"meta-app-secret", body, hashlib.sha256).hexdigest()
     r = TestClient(app).post("/webhooks/whatsapp", content=body, headers={"x-hub-signature-256": sig})
     assert r.status_code == 200
+
+
+def test_bill_pdf_is_sent_to_the_customer_after_approval(make_biz, meta):
+    from ordexa.apps.worker import HANDLERS
+    from ordexa.modules.jobs.service import run_one
+
+    biz = make_biz()
+    biz.put("/api/v1/channels/whatsapp/connection", json=CONN)
+    phone = "+923001110102"  # shop 102's number on file: verifies instantly
+    for text in ("hi", "1", "102", "5 botal calpol aur 2 dabba brufen"):
+        r = biz.post("/api/v1/channels/whatsapp/simulate", json={"phone": phone, "text": text})
+        assert r.status_code == 200, r.text
+    order = r.json()["ai_order"]
+    with get_sessionmaker()() as s:
+        while run_one(s, "outbox", HANDLERS["outbox"]):
+            pass
+    meta.calls.clear()
+    approved = biz.post(f"/api/v1/ai/orders/{order['id']}/approve", json={"acknowledge_warnings": True})
+    assert approved.status_code == 200, approved.text
+    with get_sessionmaker()() as s:
+        assert run_one(s, "outbox", HANDLERS["outbox"])
+    upload = next(c for c in meta.calls if c["url"].endswith("/123456789012345/media"))
+    assert b"%PDF" in upload["raw"] and b"application/pdf" in upload["raw"] and b"Bill-W-" in upload["raw"]
+    sent = meta.calls[-1]["body"]
+    assert sent["type"] == "document" and sent["document"]["id"] == "MEDIA-1"
+    assert sent["document"]["filename"].startswith("Bill-W-") and "confirm ho gaya" in sent["document"]["caption"]
+    msgs = biz.get(f"/api/v1/channels/whatsapp/messages?phone={phone}").json()
+    bill = [m for m in msgs if m["direction"] == "out" and m["body"].startswith("[PDF: Bill-W-")]
+    assert len(bill) == 1 and bill[0]["status"] == "sent"
+
+
+def test_bill_falls_back_to_text_when_meta_refuses_the_pdf(make_biz, meta):
+    from ordexa.apps.worker import HANDLERS
+    from ordexa.modules.jobs.service import run_one
+
+    biz = make_biz()
+    biz.put("/api/v1/channels/whatsapp/connection", json=CONN)
+    phone = "+923001110102"
+    for text in ("hi", "1", "102", "3 botal calpol"):
+        r = biz.post("/api/v1/channels/whatsapp/simulate", json={"phone": phone, "text": text})
+    order = r.json()["ai_order"]
+    with get_sessionmaker()() as s:
+        while run_one(s, "outbox", HANDLERS["outbox"]):
+            pass
+    meta.fail_media = True
+    biz.post(f"/api/v1/ai/orders/{order['id']}/approve", json={"acknowledge_warnings": True})
+    with get_sessionmaker()() as s:
+        assert run_one(s, "outbox", HANDLERS["outbox"])
+    sent = meta.calls[-1]["body"]
+    assert sent["type"] == "text" and "confirm ho gaya" in sent["text"]["body"]
+
+
+def test_bill_pdf_renders(make_biz):
+    from sqlalchemy import select
+
+    from ordexa.modules.sales.models import Invoice
+    from ordexa.modules.sales.receipt import invoice_pdf
+
+    biz = make_biz()
+    phone = "+923001110102"
+    for text in ("hi", "1", "102", "5 botal calpol aur 2 dabba brufen"):
+        r = biz.post("/api/v1/channels/whatsapp/simulate", json={"phone": phone, "text": text})
+    biz.post(f"/api/v1/ai/orders/{r.json()['ai_order']['id']}/approve", json={"acknowledge_warnings": True})
+    with get_sessionmaker()() as s:
+        inv = s.scalars(select(Invoice).where(Invoice.number.like("W-%"))).first()
+        pdf = invoice_pdf(s, inv)
+    assert pdf.startswith(b"%PDF") and len(pdf) > 1000
