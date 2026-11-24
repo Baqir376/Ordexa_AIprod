@@ -140,6 +140,11 @@ def main(argv: list[str] | None = None) -> None:
     ct.add_argument("--devices", type=int, default=2)
     sd = sub.add_parser("seed-demo", help="load synthetic pharma demo data into a business")
     sd.add_argument("--code", required=True)
+    ip = sub.add_parser("import-products", help="import a product list from Excel (.xlsx) or CSV, with opening stock")
+    ip.add_argument("--code", required=True, help="business code")
+    ip.add_argument("--file", required=True)
+    ip.add_argument("--stock", type=float, default=500, help="opening stock per product when the file has none")
+    ip.add_argument("--expiry-months", type=int, default=24)
     args = parser.parse_args(argv)
 
     if args.cmd == "serve":
@@ -187,6 +192,20 @@ def main(argv: list[str] | None = None) -> None:
                 counts = seed_demo(session, t)
                 session.commit()
                 print(f"seeded {counts['products']} products and {counts['customers']} customers into '{t.code}'")
+            elif args.cmd == "import-products":
+                from ordexa.modules.catalogue.importer import import_products
+
+                t = session.scalar(select(Tenant).where(Tenant.code == args.code))
+                if not t:
+                    sys.exit(f"unknown business code '{args.code}'")
+                r = import_products(
+                    session, t, Path(args.file), default_stock=Decimal(str(args.stock)), expiry_months=args.expiry_months
+                )
+                session.commit()
+                print(f"added {r.added} products to '{t.code}' (units: {r.by_unit})")
+                print(f"placeholder prices (no price in the file): {r.placeholder_price}")
+                print(f"skipped, already in the catalogue: {len(r.skipped_existing)} {r.skipped_existing[:10]}")
+                print(f"written twice in the file (imported once): {len(r.duplicates_in_file)} {r.duplicates_in_file[:10]}")
         except OrdexaError as e:
             sys.exit(f"error: {e.message}")
 

@@ -22,3 +22,8 @@ desktop/dist/
 desktop/tests/smoke/screenshots/
 desktop/tests/smoke/tour-screenshots/
 *.log
+
+# business data files (product lists, price lists) stay local
+medicine_data.xlsx
+*.xlsx
+!backend/tests/**/*.xlsx

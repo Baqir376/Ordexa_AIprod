@@ -62,15 +62,38 @@ def utcnow() -> datetime:
 # ------------------------------------------------------------------ matching
 
 
+# Pharmacy-list abbreviations and how shops write them: both sides are mapped to one form before comparing.
+FORM_WORDS = {
+    "syp": "syrup", "syrp": "syrup", "sirup": "syrup", "shrbat": "syrup",
+    "susp": "suspension", "sus": "suspension",
+    "tab": "tablet", "tabs": "tablet", "tablets": "tablet", "goli": "tablet", "goliyan": "tablet",
+    "cap": "capsule", "caps": "capsule", "capsules": "capsule", "capsul": "capsule",
+    "inj": "injection", "injections": "injection", "teeka": "injection", "tika": "injection",
+    "inf": "infusion", "drip": "infusion",
+    "drop": "drops", "e/d": "drops", "ed": "drops",
+    "oint": "ointment", "crm": "cream",
+}  # fmt: skip
+
+
 def _tokens(text: str) -> list[str]:
-    return [t for t in re.split(r"[\s\-/]+", normalise_phrase(text)) if t]
+    return [FORM_WORDS.get(t, t) for t in re.split(r"[\s\-/]+", normalise_phrase(text)) if t]
 
 
 def _token_hit(tok: str, name_tokens: list[str]) -> bool:
+    return _token_weight(tok, name_tokens) > 0
+
+
+def _token_weight(tok: str, name_tokens: list[str]) -> float:
+    """1 for the same word (or "400" vs "400mg"), less for a word that only looks alike ("cefix" vs "cefim")."""
+    best = 0.0
     for nt in name_tokens:
-        if tok == nt or (len(tok) >= 3 and nt.startswith(tok)) or SequenceMatcher(None, tok, nt).ratio() >= 0.8:
-            return True
-    return False
+        if tok == nt or (tok[:1].isdigit() and nt.startswith(tok)):
+            return 1.0
+        if len(tok) >= 3 and nt.startswith(tok):
+            best = max(best, 0.9)
+        elif SequenceMatcher(None, tok, nt).ratio() >= 0.8:
+            best = max(best, 0.7)
+    return best
 
 
 def score_product(phrase: str, product: Product) -> float:
@@ -84,10 +107,32 @@ def score_product(phrase: str, product: Product) -> float:
         return 1.0
     ptoks = _tokens(p)
     ntoks = _tokens(f"{product.name} {product.generic_name or ''}")
-    coverage = sum(1 for t in ptoks if _token_hit(t, ntoks)) / len(ptoks)
+    coverage = sum(_token_weight(t, ntoks) for t in ptoks) / len(ptoks)
     if coverage == 0:
         return 0.0
-    return round(0.6 * coverage + 0.4 * SequenceMatcher(None, p, name).ratio(), 3)
+    similar = SequenceMatcher(None, " ".join(ptoks), " ".join(_tokens(product.name))).ratio()
+    return round(0.6 * coverage + 0.4 * similar, 3)
+
+
+def _all_words_in(phrase: str, product: Product) -> bool:
+    ntoks = _tokens(product.name)
+    ptoks = _tokens(phrase)
+    return bool(ptoks) and all(_token_weight(t, ntoks) == 1.0 for t in ptoks)
+
+
+def clear_winner(searches: list[str], cands: list[tuple[float, Product]]) -> bool:
+    """Resolve without asking when the top product is clearly what the shop wrote:
+    its exact listed name; or the only product containing every word the shop wrote ("cefix 400" -> CEFIX 400MG CAP,
+    not CEFIM); or a clear lead in score."""
+    if not cands:
+        return False
+    if cands[0][0] >= 1.0 and (len(cands) == 1 or cands[1][0] < 1.0):
+        return True
+    for s in searches:
+        full = [p for _, p in cands if _all_words_in(s, p)]
+        if len(full) == 1 and full[0] is cands[0][1] and cands[0][0] >= RESOLVE_MIN:
+            return True
+    return cands[0][0] >= RESOLVE_MIN and (len(cands) == 1 or cands[0][0] - cands[1][0] >= RESOLVE_GAP)
 
 
 def _find_alias(session: Session, tenant_id: uuid.UUID, customer_id: uuid.UUID | None, phrase: str) -> ProductAlias | None:
@@ -240,7 +285,7 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
                         "top": [{"code": p.code, "score": s} for s, p in cands[:3]],
                     }
                 )
-                if cands and cands[0][0] >= RESOLVE_MIN and (len(cands) == 1 or cands[0][0] - cands[1][0] >= RESOLVE_GAP):
+                if clear_winner(searches, cands):
                     product = cands[0][1]
                     line.update(resolution="catalogue", score=cands[0][0])
                 elif cands:

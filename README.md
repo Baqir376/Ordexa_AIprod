@@ -12,6 +12,7 @@ A white-label ERP for Pakistani medicine distributors and chemists:
 | AI guardrails | [`docs/adr/0007-ai-guardrails.md`](docs/adr/0007-ai-guardrails.md): injection and hallucination guards, red-team results |
 | Test WhatsApp | [`docs/WHATSAPP_TESTING.md`](docs/WHATSAPP_TESTING.md): connect Meta's free test number in Settings and test from your phone |
 | Test the bot like a shop | [`docs/QA_CHAT_TESTING.md`](docs/QA_CHAT_TESTING.md): 50 tricky shop conversations against the live AI |
+| Import products from Excel | `docker compose exec api ordexa import-products --code <business> --file /tmp/list.xlsx --stock 500` (name column required; unit, price, stock, generic, company optional) |
 | Deploy (free) | [`docs/DEPLOY.md`](docs/DEPLOY.md): Neon Postgres + Render, one container, `render.yaml` blueprint |
 | AI reference design | `../orderwise` (OrderWise) |
 

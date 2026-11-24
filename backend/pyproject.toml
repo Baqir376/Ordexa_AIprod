@@ -19,6 +19,7 @@ dependencies = [
     "anthropic>=2.9",
     "cryptography>=43",
     "fpdf2>=2.8",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
