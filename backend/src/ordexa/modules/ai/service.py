@@ -26,7 +26,10 @@ from ordexa.modules.ai.extract import (
     ExtractResult,
     RuleExtractor,
     extract_order,
+    has_urdu_script,
     normalise_phrase,
+    sounds_alike,
+    urdu_to_latin,
 )
 from ordexa.modules.ai.models import AiAttachment, AiOrderRequest, ProductAlias
 from ordexa.modules.audit.models import record
@@ -157,9 +160,19 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
     lines: list[dict] = []
     for i, ex in enumerate(extraction.lines, start=1):
         phrase = normalise_phrase(ex.phrase)
+        searches = [phrase]
+        read_as = None
+        if has_urdu_script(ex.phrase):
+            # Voice notes often come back in Urdu letters; the catalogue is in English letters.
+            if ex.search_name and not has_urdu_script(ex.search_name) and sounds_alike(ex.phrase, ex.search_name):
+                read_as = normalise_phrase(ex.search_name)
+            elif ex.search_name:
+                trace.append({"step": "search_name_rejected", "line": i, "search_name": ex.search_name[:60]})
+            searches = [s for s in (read_as, normalise_phrase(urdu_to_latin(ex.phrase))) if s]
         line = {
             "line_no": i,
             "phrase": ex.phrase,
+            "read_as": read_as,
             "quantity": ex.quantity,
             "unit": ex.unit,
             "note": ex.note,
@@ -191,7 +204,9 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
         if line["product_id"]:
             product = by_id.get(uuid.UUID(str(line["product_id"])))
         if product is None:
-            alias = _find_alias(session, req.tenant_id, req.customer_id, phrase)
+            alias = next(
+                (a for a in (_find_alias(session, req.tenant_id, req.customer_id, s) for s in [phrase, *searches]) if a), None
+            )
             if alias and by_id.get(alias.product_id):
                 product = by_id[alias.product_id]
                 line.update(resolution="alias", alias_id=str(alias.id), alias_version=alias.version, score=1.0)
@@ -207,7 +222,9 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
                 )
             else:
                 scored = sorted(
-                    ((score_product(phrase, p), p) for p in products if p.is_active), key=lambda x: x[0], reverse=True
+                    ((max(score_product(s, p) for s in searches), p) for p in products if p.is_active),
+                    key=lambda x: x[0],
+                    reverse=True,
                 )
                 cands = [(s, p) for s, p in scored if s >= CANDIDATE_MIN][:5]
                 line["candidates"] = [{"product_id": str(p.id), "name": p.name, "code": p.code, "score": s} for s, p in cands]
@@ -216,6 +233,7 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
                         "step": "catalogue_search",
                         "line": i,
                         "phrase": phrase,
+                        "searched": searches,
                         "top": [{"code": p.code, "score": s} for s, p in cands[:3]],
                     }
                 )
@@ -305,15 +323,20 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
     questions = []
     for ln in lines:
         ln_phrase = guardrails.safe_echo(ln["phrase"])
+        if ln.get("read_as"):
+            ln_phrase = f"{ln_phrase} ({guardrails.safe_echo(ln['read_as'])})"
         if "not_in_message" in ln["issues"]:
             continue  # a reading error for staff to fix, not a question for the shop
         if "unusual_quantity" in ln["issues"] or "quantity_not_in_message" in ln["issues"]:
             questions.append(f"'{ln_phrase}': kitni quantity chahiye? Please confirm the quantity.")
         elif "ambiguous" in ln["issues"]:
-            opts = " / ".join(f"{k + 1}) {c['name']}" for k, c in enumerate(ln["candidates"][:4]))
-            questions.append(f"'{ln_phrase}': konsa chahiye? Which one: {opts}")
+            opts = "\n".join(f"{k + 1}) {c['name']}" for k, c in enumerate(ln["candidates"][:4]))
+            questions.append(f"'{ln_phrase}' mein se konsa chahiye? Number likh dein:\n{opts}")
         elif "not_found" in ln["issues"]:
-            questions.append(f"'{ln_phrase}': yeh item humare paas nahi mila. Please write the full product name.")
+            questions.append(
+                f"Maazrat, '{ln_phrase}' hamari list mein match nahi hua. Dawai ka naam English mein likh dein, "
+                f"jaise 'Panadol Extra' ya 'Calpol Syrup'."
+            )
         elif "missing_quantity" in ln["issues"]:
             questions.append(f"'{ln_phrase}': kitni quantity chahiye? How many?")
         elif "unit_mismatch" in ln["issues"]:
