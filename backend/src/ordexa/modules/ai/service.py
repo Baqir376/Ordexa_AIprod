@@ -551,8 +551,13 @@ def respond(session: Session, req: AiOrderRequest, ex: Extraction) -> None:
     for t in req.trace or []:
         if t.get("step") == "after_billed_order":
             prefix = f"Order {t['number']} ka bill ban chuka tha, is liye yeh naya order hai.\n"
-        if t.get("step") == "add_to_bill":
+        if t.get("step") == "add_to_bill" and t.get("mode") != "correct":
             prefix = f"Yeh items aap ke aaj ke bill {t['number']} mein add kar diye jayenge.\n"
+        if t.get("step") == "add_to_bill" and t.get("mode") == "correct":
+            body = _correction_reply(session, req, ex, t)
+            if body:
+                _queue_reply(session, req, body)
+                return
     if req.customer_id is None:
         body = replies.order_ack(req, asks_price=False) if req.lines else None
     elif kind == "price_question" and not real:
@@ -617,6 +622,47 @@ def respond(session: Session, req: AiOrderRequest, ex: Extraction) -> None:
         _close(req, "Not understood; help sent")
     if body:
         _queue_reply(session, req, body)
+
+
+def _correction_reply(session: Session, req: AiOrderRequest, ex: Extraction, t: dict) -> str | None:
+    """The shop corrects today's bill. Without a product name ("instead of 10, I need 50") the line is found on the bill:
+    the one whose quantity was the first number, or the only line. Returns the reply, or None to treat it normally."""
+    from ordexa.modules.ai import replies
+
+    bill = session.get(Invoice, uuid.UUID(t["invoice_id"]))
+    if bill is None:
+        return None
+    if not any(ln.get("product_id") for ln in req.lines):
+        nums = [Decimal(n) for n in re.findall(r"\d+(?:\.\d+)?", req.raw_text)]
+        lines = sorted(bill.lines, key=lambda x: x.line_no)
+        target = None
+        if len(nums) >= 2:
+            target = next((ln for ln in lines if ln.quantity == nums[0]), None)
+        if target is None and len(lines) == 1:
+            target = lines[0]
+        if target is None or not nums:
+            return None
+        ex.lines = [ExtractedLine(phrase=target.product_name[:200], quantity=float(nums[-1]), unit=target.unit)]
+        keep = {1: {"product_id": str(target.product_id), "resolution": "customer", "quantity": float(nums[-1]),
+                    "unit": target.unit, "quantity_confirmed": True}}  # fmt: skip
+        req.extraction = ex.model_dump()
+        evaluate(session, req, ex, keep=keep)
+    on_bill = {str(ln.product_id): ln for ln in bill.lines}
+    rows = []
+    for ln in req.lines:
+        old = on_bill.get(str(ln.get("product_id")))
+        new = replies.qty_text(ln.get("quantity"))
+        unit = ln.get("unit") or ln.get("sale_unit") or ""
+        rows.append(
+            f"- {ln.get('product_name') or ln['phrase']}: {replies.qty_text(old.quantity)} -> {new} {unit}".rstrip()
+            if old is not None
+            else f"- {ln.get('product_name') or ln['phrase']}: {new} {unit} (naya item)".rstrip()
+        )
+    q = first_question(req)
+    head = f"Theek hai, aap ke aaj ke bill {bill.number} mein yeh tabdeeli ki jayegi:\n" + "\n".join(rows)
+    if req.status == "needs_review" and q:
+        return f"{head}\nPehle yeh bata dein:\n{q}"
+    return f"{head}\nHamari team confirm karke updated bill bhej degi."
 
 
 def _close(req: AiOrderRequest, note: str) -> None:
@@ -1182,6 +1228,8 @@ def approve(
     target = None if new_bill else add_to_bill_target(req)
     bill = session.get(Invoice, uuid.UUID(target["invoice_id"])) if target else None
     if bill is not None and bill.customer_id == req.customer_id and sales.amend_blocker(session, bill) is None:
+        if target.get("mode") == "correct":
+            return _approve_bill_correction(session, actor, req, bill, inv_lines)
         return _approve_into_bill(session, actor, req, bill, inv_lines)
     if target:  # the bill can no longer take items (next day, returned...): a separate bill, and say why
         why = sales.amend_blocker(session, bill) if bill is not None else "bill not found"
@@ -1273,6 +1321,49 @@ def _approve_into_bill(
                 "ref": bill.number,
                 "body": f"Order {req.number} ke items aap ke bill {bill.number} mein add ho gaye. "
                 f"Updated bill {bill.number}: Rs {bill.total}. Updated bill attached hai. Shukriya!",
+                "document": {"kind": "invoice", "invoice_id": str(bill.id), "filename": f"Bill-{bill.number}-updated.pdf"},
+            },
+        )
+    return req, result
+
+
+def _approve_bill_correction(
+    session: Session, actor: Principal, req: AiOrderRequest, bill: Invoice, lines: list[sales.LineIn]
+) -> tuple[AiOrderRequest, sales.PostResult]:
+    """Approve a shop's correction of today's bill: quantities of products already on it are set to the new amount,
+    other products are added. Same bill number; the shop gets the updated PDF."""
+    on_bill = {ln.product_id for ln in bill.lines}
+    set_qty: dict[uuid.UUID, Decimal] = {}
+    for ln in req.lines:
+        pid = uuid.UUID(ln["product_id"])
+        if pid in on_bill:
+            set_qty[pid] = Decimal(str(ln["quantity"]))
+    add = [ln for ln in lines if ln.product_id not in on_bill]
+    result, changes = sales.revise_bill(session, actor, bill, set_qty, add, note=f"corrected by the shop, order {req.number}")
+    if result.status != "accepted":
+        raise OrdexaError(ErrorCode.CONFLICT, f"could not change bill {bill.number}: {result.reason}")
+    req.invoice_id = bill.id
+    req.status = "approved"
+    req.reviewed_by = actor.user_id
+    req.reviewed_at = utcnow()
+    req.trace = (req.trace or []) + [
+        {"step": "approved", "by": actor.username, "invoice": bill.number, "bill_corrected": changes}
+    ]
+    record(session, tenant_id=req.tenant_id, actor_user_id=actor.user_id, action="ai_order.approved", entity_type="ai_order",
+           entity_id=req.id, data={"number": req.number, "invoice": bill.number, "bill_corrected": changes})  # fmt: skip
+    if req.source == "whatsapp" and req.sender:
+        pretty = "\n".join(f"- {c.replace(' -> ', ' → ')}" for c in changes)
+        enqueue(
+            session,
+            kind="whatsapp.send",
+            queue="outbox",
+            tenant_id=req.tenant_id,
+            idempotency_key=f"wa-approved:{req.id}",
+            payload={
+                "to": req.sender,
+                "ref": bill.number,
+                "body": f"Aap ka bill {bill.number} update ho gaya:\n{pretty}\n"
+                f"Naya total: Rs {bill.total}. Updated bill attached hai.",
                 "document": {"kind": "invoice", "invoice_id": str(bill.id), "filename": f"Bill-{bill.number}-updated.pdf"},
             },
         )

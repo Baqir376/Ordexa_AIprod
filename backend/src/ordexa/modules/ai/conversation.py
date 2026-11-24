@@ -81,6 +81,15 @@ UNDO = re.compile(
 
 MATCH_MIN = 0.6
 
+_NO = re.compile(_W.format(r"nahi|nahin|nai|no|not|wrong|galat|ghalat"), re.I)
+
+
+def is_bill_correction(text: str) -> bool:
+    """ "10 ki jagah 50", "balkay 50 kar dein", "No, instead of 10, I need 50": a change to what was ordered, with a
+    number in it."""
+    return bool(re.search(r"\d", text)) and bool(CORRECTION.search(text) or SET_QTY.search(text) or _NO.search(text))
+
+
 FOLLOWUP_SCHEMA = {
     "type": "object",
     "additionalProperties": False,

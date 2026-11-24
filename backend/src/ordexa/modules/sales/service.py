@@ -416,3 +416,145 @@ def add_lines(session: Session, principal: Principal, invoice: Invoice, new_line
         data={"number": invoice.number, "added": str(money(add_total)), "total": str(invoice.total), "note": note[:200]},
     )
     return PostResult(str(invoice.id), invoice.number, "accepted", flags, total=str(invoice.total))
+
+
+def revise_bill(
+    session: Session,
+    principal: Principal,
+    invoice: Invoice,
+    set_qty: dict[uuid.UUID, Decimal],
+    add: list[LineIn],
+    *,
+    note: str,
+) -> tuple[PostResult, list[str]]:
+    """Correct today's bill in place ("10 ki jagah 50"): change the quantity of products already on it (0 removes the
+    line) and add new products. Stock and the shop's ledger move by the difference only; recorded on the bill."""
+    principal.require("invoice.create")
+    why = amend_blocker(session, invoice)
+    if why:
+        return PostResult(str(invoice.id), invoice.number, "rejected", reason=why), []
+    revision_id = uuid.uuid4()
+    changes: list[str] = []
+    flags: list[dict] = []
+    old_total = invoice.total
+    for product_id, new_qty in set_qty.items():
+        line = next((ln for ln in sorted(invoice.lines, key=lambda x: x.line_no) if ln.product_id == product_id), None)
+        if line is None:
+            continue
+        new_qty = qty(new_qty)
+        delta = new_qty - line.quantity
+        if delta == 0:
+            continue
+        inventory.post(
+            session,
+            tenant_id=principal.tenant_id,
+            warehouse_id=invoice.warehouse_id,
+            product_id=line.product_id,
+            batch_id=line.batch_id,
+            qty_delta=-delta,
+            kind="sale" if delta > 0 else "sale_correction",
+            source_type="invoice_revision",
+            source_id=revision_id,
+            source_line=line.line_no,
+            created_by=principal.user_id,
+        )
+        changes.append(f"{line.product_name}: {line.quantity.normalize():f} -> {new_qty.normalize():f} {line.unit}")
+        if new_qty <= 0:
+            invoice.lines.remove(line)
+        else:
+            line.quantity = new_qty
+            line.line_total = line_total(new_qty, line.unit_price, line.discount)
+    session.flush()
+    if add:
+        start = max((ln.line_no for ln in invoice.lines), default=0)
+        for k, ln in enumerate(add, start=1):
+            product = session.get(Product, ln.product_id)
+            batch = session.get(Batch, ln.batch_id) if ln.batch_id else None
+            if not product or product.tenant_id != principal.tenant_id:
+                continue
+            total = line_total(ln.quantity, ln.unit_price, ln.discount)
+            new_line = InvoiceLine(
+                line_no=start + k,
+                product_id=product.id,
+                batch_id=batch.id if batch else None,
+                product_name=product.name,
+                batch_no=batch.batch_no if batch else None,
+                quantity=qty(ln.quantity),
+                bonus_quantity=qty(ln.bonus_quantity),
+                unit=product.sale_unit,
+                unit_price=money(ln.unit_price),
+                discount=money(ln.discount),
+                line_total=total,
+            )
+            invoice.lines.append(new_line)
+            session.flush()
+            inventory.post(
+                session,
+                tenant_id=principal.tenant_id,
+                warehouse_id=invoice.warehouse_id,
+                product_id=product.id,
+                batch_id=new_line.batch_id,
+                qty_delta=-new_line.quantity,
+                kind="sale",
+                source_type="invoice_revision",
+                source_id=revision_id,
+                source_line=new_line.line_no,
+                created_by=principal.user_id,
+            )
+            changes.append(f"{product.name}: +{new_line.quantity.normalize():f} {product.sale_unit}")
+    if not changes:
+        return PostResult(str(invoice.id), invoice.number, "rejected", reason="nothing changes on the bill"), []
+    session.flush()
+    invoice.subtotal = money(sum((ln.line_total for ln in invoice.lines), Decimal(0)))
+    invoice.total = money(invoice.subtotal - invoice.discount)
+    diff = money(invoice.total - old_total)
+    if invoice.customer_id and diff != 0:
+        post_ledger(
+            session,
+            tenant_id=principal.tenant_id,
+            party_type="customer",
+            party_id=invoice.customer_id,
+            amount=diff,
+            kind="invoice_revision",
+            source_id=revision_id,
+            reference=f"{invoice.number} ~",
+            entry_date=local_date(session, principal.tenant_id, invoice.issued_at),
+            memo=note[:200],
+        )
+    for ln in invoice.lines:
+        left = inventory.on_hand(
+            session,
+            tenant_id=principal.tenant_id,
+            warehouse_id=invoice.warehouse_id,
+            product_id=ln.product_id,
+            batch_id=ln.batch_id,
+        )
+        if left < 0:
+            flags.append({"code": "oversold", "line_no": ln.line_no, "product": ln.product_name, "on_hand_after": str(left)})
+    invoice.flags = (
+        (invoice.flags or [])
+        + flags
+        + [
+            {
+                "code": "items_added",  # shown as "updated" everywhere
+                "kind": "revised",
+                "revision_id": str(revision_id),
+                "changes": changes,
+                "amount": str(diff),
+                "note": note[:200],
+                "by": principal.username,
+                "at": datetime.now().astimezone().isoformat(),
+                "lines": [],
+            }
+        ]
+    )
+    record(
+        session,
+        tenant_id=principal.tenant_id,
+        actor_user_id=principal.user_id,
+        action="invoice.revised",
+        entity_type="invoice",
+        entity_id=invoice.id,
+        data={"number": invoice.number, "changes": changes, "difference": str(diff), "total": str(invoice.total)},
+    )
+    return PostResult(str(invoice.id), invoice.number, "accepted", flags, total=str(invoice.total)), changes
