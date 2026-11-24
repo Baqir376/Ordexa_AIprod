@@ -7,6 +7,7 @@ import { flushSync } from 'react-dom'
 import { formatRs, lineTotal, toMilli, toPaisa } from '../../../core/money'
 import type { AppState, BatchInfo, CustomerHit, InvoiceView, ProductHit, Warning } from '../../../core/types'
 import { ordexa } from '../bridge'
+import { Icon } from '../icons'
 import { Receipt } from './Receipt'
 
 interface Line {
@@ -328,7 +329,7 @@ export function Billing({ state }: { state: AppState }) {
               <tr>
                 <td colSpan={8} className="empty-row">
                   <div className="empty-bill">
-                    <div className="big-icon">💊</div>
+                    <div className="empty-ico"><Icon name="pill" size={26} /></div>
                     <b>No items yet</b>
                     <div className="small">Type a medicine name, code or scan a barcode, then press Enter.</div>
                   </div>

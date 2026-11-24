@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { ordexa } from '../bridge'
+import { Icon } from '../icons'
 import { ErrorBox, can, useAction, useApi } from '../ui'
 
 export interface ChatMessage {
@@ -52,7 +53,7 @@ function MediaView({ media }: { media: NonNullable<ChatMessage['media']> }) {
     )
   }
   if (err) return <div className="bubble-error">{err}</div>
-  if (!url) return <div className="media-loading">{media.kind === 'audio' ? '🎤 Loading voice note…' : '📷 Loading photo…'}</div>
+  if (!url) return <div className="media-loading"><Icon name={media.kind === 'audio' ? 'mic' : 'image'} size={14} /> Loading {media.kind === 'audio' ? 'voice note' : 'photo'}…</div>
   if (media.kind === 'audio') return <audio className="chat-audio" controls src={url} />
   return (
     <>
@@ -151,13 +152,13 @@ export function ChatThread({ phone, perms, onOpenOrder, onRead, compact = false 
                 {body && <div className="bubble-text">{body}</div>}
                 <div className="meta">
                   <span>{time(m.created_at)}</span>
-                  {m.direction === 'out' && <span className={`tick ${m.status}`} title={m.error ?? m.status}>{m.status === 'failed' ? '!' : '✓✓'}</span>}
+                  {m.direction === 'out' && <span className={`tick ${m.status}`} title={m.error ?? m.status}>{m.status === 'failed' ? '!' : <><Icon name="check" size={13} /><Icon name="check" size={13} /></>}</span>}
                 </div>
                 {m.status === 'failed' && m.error && <div className="bubble-error">{m.error}</div>}
               </div>
               {m.order && onOpenOrder && (
                 <button className="order-chip" onClick={() => onOpenOrder(m.order!.id)}>
-                  <span className="oc-ico">🧾</span>
+                  <span className="oc-ico"><Icon name="receipt" size={14} /></span>
                   <span><b>{m.order.number}</b> · {ORDER_STATE[m.order.status] ?? m.order.status}</span>
                   <span className="oc-go">Open ›</span>
                 </button>
@@ -212,7 +213,7 @@ export function Chats({ perms, onOpenOrder }: { perms?: string[]; onOpenOrder: (
                 </span>
                 <span className="conv-last">
                   {c.last_direction === 'out' && <span className="muted">You: </span>}
-                  {c.last_body.replace(/^\[PDF: [^\]]+\]\s*/, '📄 ')}
+                  {c.last_body.replace(/^\[PDF: [^\]]+\]\s*/, 'Bill PDF · ')}
                 </span>
               </span>
               {c.unread > 0 && phone !== c.phone && <span className="conv-count" title="unread messages">{c.unread}</span>}
@@ -238,7 +239,7 @@ export function Chats({ perms, onOpenOrder }: { perms?: string[]; onOpenOrder: (
           </>
         ) : (
           <div className="empty-state" style={{ height: '100%' }}>
-            <div className="big-icon">💬</div>
+            <div className="empty-ico"><Icon name="message" size={26} /></div>
             <b>Pick a chat</b>
             <div className="small">See exactly what each shop wrote and what the bot replied.</div>
           </div>

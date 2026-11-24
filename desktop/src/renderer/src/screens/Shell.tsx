@@ -5,7 +5,7 @@ import { ordexa } from '../bridge'
 import { Icon } from '../icons'
 import { can } from '../ui'
 import { Staff, Settings } from './Admin'
-import { AiOrders } from './AiOrders'
+import { AiOrders, deskSeenAt } from './AiOrders'
 import { Billing } from './Billing'
 import { Customers } from './Customers'
 import { Dashboard } from './Dashboard'
@@ -112,7 +112,7 @@ export function Shell({ state, refresh }: { state: AppState; refresh: () => void
   else if (tab === 'settings') body = <Settings state={state} />
 
   const groups = [...new Set(visible.map((n) => n.group))]
-  const todo = notice ? notice.ready + notice.fix + notice.messages : 0
+  const todo = notice?.new?.total ?? 0
   return (
     <div className="shell">
       <header className="topbar">
@@ -162,7 +162,13 @@ export function Shell({ state, refresh }: { state: AppState; refresh: () => void
 }
 
 
-interface Notice { ready: number; fix: number; messages: number; waiting_shop: number }
+interface Notice {
+  ready: number
+  fix: number
+  messages: number
+  waiting_shop: number
+  new?: { ready: number; fix: number; messages: number; total: number }
+}
 
 /** What is waiting for staff on the WhatsApp desk (polled while signed in online). */
 function useNotice(state: AppState): Notice | null {
@@ -171,25 +177,28 @@ function useNotice(state: AppState): Notice | null {
   useEffect(() => {
     if (!allowed) return
     let alive = true
-    const load = () =>
+    const load = () => {
+      const since = deskSeenAt() ?? new Date(Date.now() - 24 * 3600_000).toISOString()
       void ordexa()
-        .request<Notice>('GET', '/api/v1/ai/orders/counts')
+        .request<Notice>('GET', `/api/v1/ai/orders/counts?since=${encodeURIComponent(since)}`)
         .then((r) => alive && setN(r), () => undefined)
+    }
     load()
     const t = setInterval(load, 15_000)
-    return () => { alive = false; clearInterval(t) }
+    window.addEventListener('ordexa:desk-seen', load) // opening the desk clears the badge at once
+    return () => { alive = false; clearInterval(t); window.removeEventListener('ordexa:desk-seen', load) }
   }, [allowed])
   return allowed ? n : null
 }
 
 function Bell({ counts, onOpen }: { counts: Notice; onOpen: () => void }) {
   const [open, setOpen] = useState(false)
-  const total = counts.ready + counts.fix + counts.messages
-  const rows: [string, number, string][] = [
-    ['Ready to approve', counts.ready, 'ok'],
-    ['Need your fix', counts.fix, 'warn'],
-    ['Messages from shops', counts.messages, 'bad'],
-    ['Waiting for the shop to reply', counts.waiting_shop, 'info'],
+  const total = counts.new?.total ?? 0
+  const rows: [string, number, number, string][] = [
+    ['Ready to approve', counts.ready, counts.new?.ready ?? 0, 'ok'],
+    ['Need your fix', counts.fix, counts.new?.fix ?? 0, 'warn'],
+    ['Messages from shops', counts.messages, counts.new?.messages ?? 0, 'bad'],
+    ['Waiting for the shop to reply', counts.waiting_shop, 0, 'info'],
   ]
   return (
     <div className="bell-wrap">
@@ -202,14 +211,16 @@ function Bell({ counts, onOpen }: { counts: Notice; onOpen: () => void }) {
       </button>
       {open && (
         <div className="bell-pop card" onMouseLeave={() => setOpen(false)}>
-          <div className="bell-title">WhatsApp desk</div>
-          {rows.map(([label, n, tone]) => (
+          <div className="bell-title">{total ? `${total} new since you last looked` : 'Nothing new'}</div>
+          {rows.map(([label, n, fresh, tone]) => (
             <button key={label} className="bell-row" onClick={() => { setOpen(false); onOpen() }}>
               <span className={`dot-${tone}`} />
               <span>{label}</span>
+              {fresh > 0 && <em className="bell-new">{fresh} new</em>}
               <b>{n}</b>
             </button>
           ))}
+          <div className="bell-foot">Opening WhatsApp orders marks everything as seen.</div>
         </div>
       )}
     </div>

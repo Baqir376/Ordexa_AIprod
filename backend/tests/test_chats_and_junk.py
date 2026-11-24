@@ -103,3 +103,16 @@ def test_order_stages_for_the_desk(make_biz):
     say(biz, "2")
     c = biz.get("/api/v1/ai/orders/counts").json()
     assert c["ready"] == 1 and c["waiting_shop"] == 0
+
+
+def test_notification_badge_counts_only_what_is_new_since_last_look(make_biz):
+    from datetime import UTC, datetime, timedelta
+
+    biz = verified(make_biz())
+    say(biz, "5 botal calpol")
+    from urllib.parse import quote
+
+    before = quote((datetime.now(UTC) - timedelta(minutes=5)).isoformat())
+    later = quote((datetime.now(UTC) + timedelta(seconds=5)).isoformat())
+    assert biz.get(f"/api/v1/ai/orders/counts?since={before}").json()["new"]["ready"] == 1
+    assert biz.get(f"/api/v1/ai/orders/counts?since={later}").json()["new"]["total"] == 0  # seen: badge clears

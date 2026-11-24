@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 
 import type { AppState, CustomerHit, ProductHit } from '../../../core/types'
 import { ordexa } from '../bridge'
+import { Icon } from '../icons'
 import { ChatThread, Chats, ago, initials } from './Chats'
 import { ErrorBox, Modal, can, rs, uid, useAction, useApi } from '../ui'
 
@@ -94,11 +95,11 @@ const ISSUE_TEXT: Record<string, string> = {
 
 type Filter = 'open' | 'messages' | 'approved' | 'rejected' | 'closed'
 const FILTERS: { key: Filter; label: string; icon: string; help: string }[] = [
-  { key: 'open', label: 'To do', icon: '📥', help: 'New orders. Approve the green ones, fix the amber ones; blue ones are waiting for the shop to answer the bot.' },
-  { key: 'messages', label: 'Messages', icon: '💬', help: 'Complaints and questions from shops that need a person. Reply in Chats, then mark them handled.' },
-  { key: 'approved', label: 'Billed', icon: '✅', help: 'Orders you approved. Their bills were sent to the shop on WhatsApp.' },
-  { key: 'rejected', label: 'Rejected', icon: '⛔', help: 'Orders you rejected or the shop cancelled.' },
-  { key: 'closed', label: 'Bot replied', icon: '🤖', help: 'Messages the bot answered by itself: balance, a copy of the last bill, rates, greetings. Nothing for you to do.' },
+  { key: 'open', label: 'To do', icon: 'inbox', help: 'New orders. Approve the green ones, fix the amber ones; blue ones are waiting for the shop to answer the bot.' },
+  { key: 'messages', label: 'Messages', icon: 'message', help: 'Complaints and questions from shops that need a person. Reply in Chats, then mark them handled.' },
+  { key: 'approved', label: 'Billed', icon: 'checkCircle', help: 'Orders you approved. Their bills were sent to the shop on WhatsApp.' },
+  { key: 'rejected', label: 'Rejected', icon: 'xCircle', help: 'Orders you rejected or the shop cancelled.' },
+  { key: 'closed', label: 'Bot replied', icon: 'bot', help: 'Messages the bot answered by itself: balance, a copy of the last bill, rates, greetings. Nothing for you to do.' },
 ]
 
 /** One clear label per order, from what has to happen next. */
@@ -138,6 +139,17 @@ export function AiOrders({ state }: { state: AppState }) {
   const { busy, error: delError, run } = useAction()
   const canDelete = can(perms, 'sales_order.approve')
   const reload = () => { void list.reload(); void counts.reload() }
+  const [opened, setOpened] = useState<Set<string>>(() => loadOpened())
+  const isNew = (o: Order) => ['ready', 'fix', 'message'].includes(o.stage ?? o.status) && !opened.has(o.id)
+  const open = (id: string) => {
+    setOpenId(id)
+    setOpened((cur) => {
+      const next = new Set(cur).add(id)
+      saveOpened(next)
+      return next
+    })
+  }
+  useEffect(() => markDeskSeen(), [])
 
   useEffect(() => {
     const t = setInterval(() => { void list.reload(); void counts.reload() }, 10_000) // new WhatsApp orders appear without refreshing
@@ -181,19 +193,19 @@ export function AiOrders({ state }: { state: AppState }) {
       <button
         key={o.id}
         className={`order-card tone-${stageOf(o).tone} ${openId === o.id && !selecting ? 'active' : ''} ${sel ? 'picked' : ''}`}
-        onClick={() => (selecting ? o.status !== 'approved' && toggle(o.id) : setOpenId(o.id))}
+        onClick={() => (selecting ? o.status !== 'approved' && toggle(o.id) : open(o.id))}
       >
         {selecting ? (
-          <span className={`avatar check ${sel ? 'on' : ''}`}>{sel ? '✓' : ''}</span>
+          <span className={`avatar check ${sel ? 'on' : ''}`}>{sel && <Icon name="check" size={16} />}</span>
         ) : (
           <span className={`avatar ${o.customer ? '' : 'stranger'}`}>{initials(who)}</span>
         )}
         <div className="oc-top">
-          <b title={who}>{who}</b>
-          <span className={`stage-chip tone-${stageOf(o).tone}`}>{stageOf(o).tone === 'ready' && <i className="pulse" />}{stageOf(o).label}</span>
+          <b title={who}>{isNew(o) && <span className="new-dot" title="New" />}{who}</b>
+          <span className={`stage-chip tone-${stageOf(o).tone}`}><i />{stageOf(o).label}</span>
         </div>
         <div className="oc-text">
-          {o.kind === 'image' ? '📷 Photo ' : o.kind === 'audio' ? '🎤 Voice note ' : ''}
+          {o.kind === 'image' && <span className="media-tag"><Icon name="image" size={13} /> Photo</span>}{o.kind === 'audio' && <span className="media-tag"><Icon name="mic" size={13} /> Voice note</span>}
           {o.raw_text.startsWith('[') ? '' : o.raw_text}
         </div>
         <div className="oc-meta">
@@ -216,10 +228,10 @@ export function AiOrders({ state }: { state: AppState }) {
         </div>
         <div className="view-switch" role="tablist">
           <button role="tab" aria-selected={view === 'orders'} className={view === 'orders' ? 'active' : ''} onClick={() => setView('orders')}>
-            🧾 Orders {counts.data?.open ? <span className="count">{counts.data.open}</span> : null}
+            <Icon name="receipt" size={16} /> Orders
           </button>
           <button role="tab" aria-selected={view === 'chats'} className={view === 'chats' ? 'active' : ''} onClick={() => setView('chats')}>
-            💬 Chats
+            <Icon name="message" size={16} /> Chats
           </button>
         </div>
         {view === 'orders' && can(perms, 'sales_order.create') && (
@@ -227,8 +239,26 @@ export function AiOrders({ state }: { state: AppState }) {
         )}
       </div>
       {view === 'chats' ? (
-        <Chats perms={perms} onOpenOrder={(id) => { setView('orders'); setOpenId(id) }} />
+        <Chats perms={perms} onOpenOrder={(id) => { setView('orders'); open(id) }} />
       ) : (
+        <>
+        <div className="kpis">
+          {([
+            ['ready', 'Ready to approve', 'checkCircle', 'Approve to create the bill', 'open'],
+            ['fix', 'Needs your fix', 'alert', 'Pick a product or confirm a quantity', 'open'],
+            ['waiting_shop', 'Waiting for shop', 'clock', 'The bot asked the shop a question', 'open'],
+            ['messages', 'Messages', 'message', 'Complaints and questions to answer', 'messages'],
+          ] as const).map(([k, label, icon, hint, tab]) => (
+            <button key={k} className={`kpi kpi-${k}`} onClick={() => setFilter(tab)}>
+              <span className="kpi-ico"><Icon name={icon} size={18} /></span>
+              <span className="kpi-body">
+                <span className="kpi-label">{label}</span>
+                <span className="kpi-value">{counts.data?.[k] ?? '–'}</span>
+                <span className="kpi-hint">{hint}</span>
+              </span>
+            </button>
+          ))}
+        </div>
         <div className="desk">
           <div className="desk-list">
             <div className="desk-list-head">
@@ -238,7 +268,7 @@ export function AiOrders({ state }: { state: AppState }) {
                   const hot = (f.key === 'open' && (counts.data?.ready ?? 0) + (counts.data?.fix ?? 0) > 0) || (f.key === 'messages' && (n ?? 0) > 0)
                   return (
                     <button key={f.key} role="tab" aria-selected={filter === f.key} className={`folder ${filter === f.key ? 'active' : ''}`} onClick={() => setFilter(f.key)} title={f.help}>
-                      <span className="folder-icon">{f.icon}</span>
+                      <span className="folder-icon"><Icon name={f.icon} size={16} /></span>
                       <span className="folder-label">{f.label}</span>
                       {n !== undefined && <span className={`count ${hot && filter !== f.key ? 'hot' : ''}`}>{n}</span>}
                     </button>
@@ -258,7 +288,7 @@ export function AiOrders({ state }: { state: AppState }) {
                 <div className="select-bar">
                   <span>{picked.size} selected</span>
                   <button className="btn small ghost" onClick={() => setPicked(new Set(deletable.map((o) => o.id)))}>Select all {deletable.length}</button>
-                  <button className="btn small danger" disabled={!picked.size || busy} onClick={() => void deletePicked()}>🗑 Delete</button>
+                  <button className="btn small danger" disabled={!picked.size || busy} onClick={() => void deletePicked()}><Icon name="trash" size={14} /> Delete</button>
                 </div>
               )}
               <ErrorBox error={delError} />
@@ -267,7 +297,7 @@ export function AiOrders({ state }: { state: AppState }) {
             <div className="desk-items">
               {list.data && rows.length === 0 && (
                 <div className="empty-state">
-                  <div className="big-icon">{filter === 'messages' ? '📭' : '✓'}</div>
+                  <div className="empty-ico"><Icon name={filter === 'messages' ? 'message' : 'checkCircle'} size={26} /></div>
                   <div>
                     {needle
                       ? 'Nothing matches your search.'
@@ -292,13 +322,14 @@ export function AiOrders({ state }: { state: AppState }) {
               <OrderDetail key={openId} id={openId} state={state} onChanged={reload} onDeleted={() => { setOpenId(null); reload() }} />
             ) : (
               <div className="empty-state hero-empty">
-                <div className="big-icon">🧾</div>
+                <div className="empty-ico"><Icon name="receipt" size={26} /></div>
                 <b>Select an order</b>
                 <div className="small">Check the items the AI read, fix anything highlighted, and approve the bill in one click.</div>
               </div>
             )}
           </div>
         </div>
+      </>
       )}
       {newOrder && <NewOrderModal onClose={() => setNewOrder(false)} onCreated={(id) => { setNewOrder(false); setOpenId(id); reload() }} />}
     </div>
@@ -324,7 +355,7 @@ function OrderSteps({ status }: { status: string }) {
     <ol className="steps-line">
       {STEPS.map((s, i) => (
         <li key={s.key} className={i < at ? 'done' : i === at ? 'now' : ''}>
-          <span className="step-dot">{i < at ? '✓' : i + 1}</span>
+          <span className="step-dot">{i < at ? <Icon name="check" size={12} /> : i + 1}</span>
           {s.label}
         </li>
       ))}
@@ -408,16 +439,16 @@ function OrderDetail({ id, state, onChanged, onDeleted }: { id: string; state: A
           </div>
         </div>
         <div className="head-side">
-          <span className={`stage-chip tone-${stageOf(order).tone}`}>{stageOf(order).tone === 'ready' && <i className="pulse" />}{stageOf(order).label}</span>
+          <span className={`stage-chip tone-${stageOf(order).tone}`}><i />{stageOf(order).label}</span>
           {can(perms, 'sales_order.approve') && order.status !== 'approved' && (
-            <button className="btn small ghost" title="Delete junk" onClick={() => void remove()}>🗑 Delete</button>
+            <button className="btn small ghost" title="Delete junk" onClick={() => void remove()}><Icon name="trash" size={14} /> Delete</button>
           )}
         </div>
         <OrderSteps status={order.status} />
         {order.source === 'whatsapp' && order.sender && (
           <div className="seg pane-switch">
-            <button className={pane === 'order' ? 'active' : ''} onClick={() => setPane('order')}>🧾 Order</button>
-            <button className={pane === 'chat' ? 'active' : ''} onClick={() => setPane('chat')}>💬 Chat with shop</button>
+            <button className={pane === 'order' ? 'active' : ''} onClick={() => setPane('order')}><Icon name="receipt" size={15} /> Order</button>
+            <button className={pane === 'chat' ? 'active' : ''} onClick={() => setPane('chat')}><Icon name="message" size={15} /> Chat with shop</button>
           </div>
         )}
       </div>
@@ -647,4 +678,38 @@ function Attachment({ orderId, kind }: { orderId: string; kind: string }) {
       )}
     </>
   )
+}
+
+
+// "New" = arrived since this person last opened the WhatsApp desk, and not opened yet. Kept on this PC.
+const OPENED_KEY = 'ordexa.desk.opened'
+const SEEN_KEY = 'ordexa.desk.seenAt'
+function loadOpened(): Set<string> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(OPENED_KEY) ?? '[]') as string[])
+  } catch {
+    return new Set()
+  }
+}
+function saveOpened(ids: Set<string>) {
+  try {
+    localStorage.setItem(OPENED_KEY, JSON.stringify([...ids].slice(-800)))
+  } catch {
+    /* storage full or blocked: "new" markers just reappear */
+  }
+}
+export function deskSeenAt(): string | null {
+  try {
+    return localStorage.getItem(SEEN_KEY)
+  } catch {
+    return null
+  }
+}
+export function markDeskSeen() {
+  try {
+    localStorage.setItem(SEEN_KEY, new Date().toISOString())
+    window.dispatchEvent(new Event('ordexa:desk-seen'))
+  } catch {
+    /* ignore */
+  }
 }

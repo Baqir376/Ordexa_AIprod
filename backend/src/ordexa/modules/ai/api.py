@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Response
@@ -165,8 +166,13 @@ def _stage_counts(session: Session, tenant_id) -> dict:
 
 
 @router.get("/orders/counts")
-def order_counts(p: Principal = Depends(requires("sales_order.view")), session: Session = Depends(get_session)):
-    """How many orders are in each desk tab (open = everything still waiting for someone)."""
+def order_counts(
+    since: datetime | None = None,
+    p: Principal = Depends(requires("sales_order.view")),
+    session: Session = Depends(get_session),
+):
+    """How many orders are in each desk tab (open = everything still waiting for someone). With ``since`` (when this
+    person last looked at the desk) it also says how many of those arrived after that: the notification badge."""
     rows = dict(
         session.execute(
             select(AiOrderRequest.status, func.count())
@@ -182,7 +188,27 @@ def order_counts(p: Principal = Depends(requires("sales_order.view")), session: 
         "approved": rows.get("approved", 0),
         "rejected": rows.get("rejected", 0),
         "closed": rows.get("closed", 0),
+        **({"new": _new_since(session, p.tenant_id, since)} if since else {}),
     }
+
+
+def _new_since(session: Session, tenant_id, since: datetime) -> dict:
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=UTC)
+    new = {"ready": 0, "fix": 0, "messages": 0, "total": 0}
+    for r in session.scalars(
+        select(AiOrderRequest).where(
+            AiOrderRequest.tenant_id == tenant_id,
+            AiOrderRequest.status.in_(("draft_ready", "needs_review", "failed", "message")),
+            func.coalesce(AiOrderRequest.processed_at, AiOrderRequest.received_at) > since,
+        )
+    ):
+        st = stage(r)
+        key = "messages" if r.status == "message" else st if st in ("ready", "fix") else None
+        if key:
+            new[key] += 1
+            new["total"] += 1
+    return new
 
 
 @router.get("/orders")
