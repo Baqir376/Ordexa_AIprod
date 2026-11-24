@@ -330,7 +330,15 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
             ln_phrase = f"{ln_phrase} ({guardrails.safe_echo(ln['read_as'])})"
         if "not_in_message" in ln["issues"]:
             continue  # a reading error for staff to fix, not a question for the shop
-        if "unusual_quantity" in ln["issues"] or "quantity_not_in_message" in ln["issues"]:
+        if "unusual_quantity" in ln["issues"]:
+            questions.append(
+                f"'{ln_phrase}': {_qty_text(ln['quantity'])} {ln.get('unit') or ''} bohat zyada hai. "
+                f"Sahi quantity sirf number mein likh dein."
+            )
+        elif "fractional_quantity" in ln["issues"]:
+            u = ln.get("unit") or ln.get("sale_unit") or ""
+            questions.append(f"'{ln_phrase}': {_qty_text(ln['quantity'])} {u} — hum poore {u} mein bechte hain. Kitne {u}?")
+        elif "quantity_not_in_message" in ln["issues"]:
             questions.append(f"'{ln_phrase}': kitni quantity chahiye? Please confirm the quantity.")
         elif "ambiguous" in ln["issues"]:
             cands = ln["candidates"][:4]
@@ -347,6 +355,8 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
                     f"'{ln_phrase}' naam ki item hamari list mein nahi hai, lekin yeh brands is mein aate hain. "
                     f"Konsa chahiye? Number likh dein:\n{opts}"
                 )
+            elif len(cands) == 1:
+                questions.append(f"'{ln_phrase}' se murad '{cands[0]['name']}' hai? Haan ya nahi likhein.")
             else:
                 opts = "\n".join(f"{k + 1}) {c['name']}" for k, c in enumerate(cands))
                 questions.append(f"'{ln_phrase}' mein se konsa chahiye? Number likh dein:\n{opts}")
@@ -382,8 +392,9 @@ def _apply_guardrails(extraction: Extraction, source: str, *, from_photo: bool) 
     extraction.guard_warnings = guardrails.check(extraction, source, from_photo=from_photo)
 
 
-def process_request(session: Session, request_id: uuid.UUID) -> AiOrderRequest:
-    req = session.get(AiOrderRequest, request_id)
+def process_request(session: Session, request_id: uuid.UUID, *, defer_on_rate_limit: bool = False) -> AiOrderRequest:
+    # Row lock: a second processor (worker retry, simulator) waits here and then sees the order already processed.
+    req = session.get(AiOrderRequest, request_id, with_for_update=True)
     if req is None:
         raise LookupError(f"AI request {request_id} not found")
     if req.status not in ("received", "processing", "failed"):
@@ -407,11 +418,18 @@ def process_request(session: Session, request_id: uuid.UUID) -> AiOrderRequest:
             text = att.transcript or ""  # transcript read like a text order; without one, staff listen
     source = text
     clean = guardrails.sanitize_input(text)
-    result = extract_order(clean, image) if (clean or image) else ExtractResult(Extraction(), "none", [])
+    result = (
+        extract_order(clean, image, defer_on_rate_limit=defer_on_rate_limit)
+        if (clean or image)
+        else ExtractResult(Extraction(), "none", [])
+    )
     _apply_guardrails(result.extraction, source, from_photo=image is not None)
+    _classify(result.extraction, source, result.extractor)
+    _merge_duplicates(result.extraction)
     req.extractor = result.extractor
     req.extraction = result.extraction.model_dump()
-    req.trace = ([voice_trace] if voice_trace else []) + result.trace
+    carried = [t for t in (req.trace or []) if t.get("step") == "after_billed_order"]  # set when the message came in
+    req.trace = carried + ([voice_trace] if voice_trace else []) + result.trace
     req.error = None
     evaluate(session, req, result.extraction)
     record(
@@ -423,8 +441,154 @@ def process_request(session: Session, request_id: uuid.UUID) -> AiOrderRequest:
         data={"number": req.number, "status": req.status, "extractor": req.extractor, "lines": len(req.lines)},
     )
     if req.source == "whatsapp":
-        _notify_customer(session, req)
+        respond(session, req, result.extraction)
     return req
+
+
+GREETING_WORDS = r"shukriya|shukria|thanks?|thank you|jazak ?allah|salam|assalam ?o ?alaikum|aoa|regards|sir|bhai|ji|please|order"
+
+NON_ORDER_KINDS = {"balance", "bill_request", "order_status", "repeat_last_order"}
+
+
+def _classify(ex: Extraction, source: str, extractor: str) -> None:
+    """Rule-based message type when no AI read the message, or when the AI found no items in an "order"."""
+    from ordexa.modules.ai.extract import rule_message_type
+
+    if not extractor.startswith(("groq", "anthropic")):
+        keyword_kind, _ = rule_message_type(source, False)
+        has_qty = any(ln.quantity for ln in ex.lines)
+        # "shop 101 ka balance": a number without a unit next to balance/bill/status words is not an order.
+        if has_qty and keyword_kind in NON_ORDER_KINDS and not any(ln.unit for ln in ex.lines if ln.quantity):
+            has_qty = False
+            ex.lines = []
+        ex.message_type, ex.asks_price = rule_message_type(source, has_qty)
+        if ex.message_type == "other" and ex.lines:
+            ex.message_type = "order"  # "panadol extra bhej do": an order without a quantity (the bot asks)
+    elif not ex.lines and ex.message_type == "order":
+        ex.message_type = rule_message_type(source, False)[0]
+    if not ex.lines and not any(ch.isalpha() for ch in source or ""):
+        ex.message_type = "other"  # "?", "..." - send the help text, not a staff ticket
+
+
+def _merge_duplicates(ex: Extraction) -> None:
+    """'5 box panadol extra, aur 5 box panadol extra bhi' -> one line of 10 (the reply shows the total to the shop)."""
+    seen: dict[tuple, ExtractedLine] = {}
+    merged = False
+    out = []
+    for ln in ex.lines:
+        key = (normalise_phrase(ln.phrase), ln.unit)
+        first = seen.get(key)
+        if first is not None and first.quantity is not None and ln.quantity is not None and not ln.flags and not first.flags:
+            first.quantity = first.quantity + ln.quantity
+            merged = True
+            continue
+        seen.setdefault(key, ln)
+        out.append(ln)
+    if merged:
+        ex.lines = out
+        ex.guard_warnings.append(
+            {"code": "merged_duplicates", "message": "The same item was written twice; quantities were added up."}
+        )
+
+
+def respond(session: Session, req: AiOrderRequest, ex: Extraction) -> None:
+    """Reply to the shop according to what the message was, and close requests that are not orders."""
+    from ordexa.modules.ai import replies
+
+    if not req.sender:
+        return
+    kind = ex.message_type
+    real = [ln for ln in req.lines if ln.get("quantity")]
+    is_order = kind == "order" or bool(real)  # words the rule parser took for items in "mera hisaab batao" are not an order
+    body: str | None
+    prefix = ""
+    for t in req.trace or []:
+        if t.get("step") == "after_billed_order":
+            prefix = f"Order {t['number']} ka bill ban chuka tha, is liye yeh naya order hai.\n"
+    if req.customer_id is None:
+        body = replies.order_ack(req, asks_price=False) if req.lines else None
+    elif kind == "price_question" and not real:
+        if not req.lines:  # some models leave the products out of a pure rate question: read their names by rule
+            named = [ln for ln in RuleExtractor().extract(req.raw_text).extraction.lines if ln.phrase]
+            if named:
+                evaluate(session, req, Extraction(lines=named))
+        body = replies.price_text(session, req)
+        _close(req, "Rates sent to the shop")
+    elif kind == "repeat_last_order" and not real:
+        inv, lines, keep = replies.repeat_lines(session, req)
+        if inv is None:
+            body = "Aap ka koi pichla bill nahi mila. " + replies.HELP
+            _close(req, "No previous bill to repeat")
+        else:
+            ex.lines = lines
+            req.extraction = ex.model_dump()
+            req.trace = (req.trace or []) + [{"step": "repeat_of_bill", "invoice": inv.number}]
+            evaluate(session, req, ex, keep=keep)
+            body = replies.order_ack(req, asks_price=ex.asks_price, prefix=f"Pichla order (bill {inv.number}) dobara:\n")
+    elif req.lines and is_order:
+        body = replies.order_ack(req, asks_price=ex.asks_price, prefix=prefix)
+        if ex.asks_price and req.status == "needs_review":
+            body = replies.price_text(session, req, footer=False) + "\n\n" + body
+        note = (ex.non_order_text or "").strip()
+        greeting_only = bool(re.fullmatch(r"[\W_]*(?:" + GREETING_WORDS + r")?[\W_]*", note.lower()))
+        if kind in ("complaint", "question") or (len(note) >= 15 and not greeting_only):
+            # e.g. "pichli dafa 2 botal tooti hui thi" next to the order: staff must see it, the shop is told so.
+            req.warnings = (req.warnings or []) + [
+                {"code": "shop_question", "message": f"Shop also wrote: {note or req.raw_text[:200]}"}
+            ]
+            body += "\nAap ki baat bhi hamari team tak pohancha di hai."
+    elif req.kind in ("image", "audio") and not req.lines:
+        what = "photo" if req.kind == "image" else "voice message"
+        body = f"Shukriya! Aap ka {what} mil gaya (order {req.number}). Hamari team check karke confirm karegi."
+    elif ex.contains_instructions or kind in ("complaint", "question"):
+        req.status = "message"
+        req.warnings = [{"code": "shop_question", "message": f"Shop wrote: {req.raw_text[:300]}"}]
+        body = (
+            "Takleef ke liye maazrat. Aap ki shikayat hamari team ko bhej di hai, woh jald raabta karegi."
+            if kind == "complaint"
+            else "Aap ka message hamari team ko bhej diya hai, woh jald jawab degi."
+        )
+    elif kind == "balance":
+        body = replies.balance_text(session, req.tenant_id, req.customer_id)
+        _close(req, "Balance sent to the shop")
+    elif kind == "bill_request":
+        body = replies.send_bill(session, req) or None
+        _close(req, "Last bill sent to the shop")
+    elif kind == "order_status":
+        body = replies.status_text(session, req)
+        if "Delivery ke waqt" in body:
+            req.status = "message"
+            req.warnings = [{"code": "shop_question", "message": f"Shop asks: {req.raw_text[:300]}"}]
+        else:
+            _close(req, "Order status sent to the shop")
+    elif kind == "greeting_thanks":
+        body = "Shukriya! " + replies.HELP
+        _close(req, "Greeting")
+    else:
+        body = "Maazrat, samajh nahi aaya. " + replies.HELP
+        _close(req, "Not understood; help sent")
+    if body:
+        _queue_reply(session, req, body)
+
+
+def _close(req: AiOrderRequest, note: str) -> None:
+    """Not an order: answered by the bot, nothing for staff to approve."""
+    req.status = "closed"
+    req.review_note = note
+    req.lines = []
+    req.questions = []
+
+
+def _queue_reply(session: Session, req: AiOrderRequest, body: str) -> None:
+    key = hashlib.sha256(body.encode()).hexdigest()[:16]
+    enqueue(
+        session,
+        kind="whatsapp.send",
+        queue="outbox",
+        tenant_id=req.tenant_id,
+        idempotency_key=f"wa-reply:{req.id}:{key}",
+        payload={"to": req.sender, "body": body, "ref": req.number},
+    )
 
 
 def _qty_text(v) -> str:
@@ -516,8 +680,18 @@ def apply_customer_answer(session: Session, req: AiOrderRequest, text: str) -> s
     issues = set(target["issues"])
     ex = Extraction.model_validate(req.extraction)
     answered = False
+    low = re.sub(r"[\s.!]+", " ", text.lower()).strip()
+    cands = target.get("candidates") or []
+    if "ambiguous" in issues and len(cands) == 1 and low in YES_WORDS:
+        text = "1"
+    if "ambiguous" in issues and len(cands) == 1 and low in NO_WORDS:
+        return "Theek hai, sahi dawai ka naam likh dein."
+    if "ambiguous" in issues and 2 <= len(cands) <= 3 and re.search(r"(?<!\w)(dono|donon|both|teeno|sab)(?!\w)", low):
+        return _take_all_options(session, req, lines, target, text)
     if issues & {"ambiguous", "not_found"}:
         n = _number(text)
+        if n is not None and "ambiguous" in issues and n == int(n) and not 1 <= int(n) <= len(cands):
+            return f"Maazrat, {int(n)} number list mein nahi hai. 1 se {len(cands)} tak likhein.\n{first_question(req)}"
         if n is not None and "ambiguous" in issues and 1 <= int(n) <= len(target["candidates"]):
             target["product_id"] = target["candidates"][int(n) - 1]["product_id"]
             target["resolution"] = "customer"
@@ -571,10 +745,44 @@ def apply_customer_answer(session: Session, req: AiOrderRequest, text: str) -> s
         entity_id=req.id,
         data={"number": req.number, "status": req.status},
     )
+    return _after_answer(req)
+
+
+YES_WORDS = {"haan", "han", "ha", "haa", "ji", "jee", "ji haan", "haan ji", "yes", "y", "sahi", "theek", "ok", "okay", "1"}
+NO_WORDS = {"nahi", "nahin", "nhi", "nai", "na", "no", "n", "ghalat", "galat"}
+
+
+def _after_answer(req: AiOrderRequest) -> str:
+    from ordexa.modules.ai import replies
+
     q = first_question(req)
     if q:
         return f"Shukriya! Ab yeh bata dein:\n{q}"
-    return f"Shukriya! Order {req.number} update ho gaya. Hamari team confirm karke bill bhej degi."
+    return (
+        f"Shukriya! Order {req.number} update ho gaya:\n{replies.items_text(req.lines)}\n"
+        f"Hamari team confirm karke bill bhej degi."
+    )
+
+
+def _take_all_options(session: Session, req: AiOrderRequest, lines: list[dict], target: dict, text: str) -> str:
+    """'dono' in answer to 'which one?': order each option with the same quantity (the reply lists them)."""
+    ex = Extraction.model_validate(req.extraction)
+    new_ex, keep = [], {}
+    for ln in lines:
+        src = ex.lines[ln["line_no"] - 1]
+        if ln is target:
+            for c in target["candidates"][:3]:
+                new_ex.append(src.model_copy(update={"phrase": c["name"][:200], "search_name": None}))
+                keep[len(new_ex)] = {"product_id": c["product_id"], "resolution": "customer"}
+        else:
+            new_ex.append(src)
+            if ln.get("resolution") in ("operator", "customer"):
+                keep[len(new_ex)] = ln
+    ex.lines = new_ex
+    req.extraction = ex.model_dump()
+    req.trace = (req.trace or []) + [{"step": "customer_answer", "answer": text[:300], "at": utcnow().isoformat()}]
+    evaluate(session, req, ex, keep=keep)
+    return _after_answer(req)
 
 
 # ------------------------------------------------------------------ intake
@@ -980,6 +1188,13 @@ def reject(session: Session, actor: Principal, request_id: uuid.UUID, reason: st
     req.review_note = reason.strip()[:300]
     req.reviewed_by = actor.user_id
     req.reviewed_at = utcnow()
+    if req.source == "whatsapp" and req.sender:
+        _queue_reply(
+            session,
+            req,
+            f"Maazrat, aap ka order {req.number} is waqt process nahi ho saka. Wajah: {req.review_note}. "
+            f"Mazeed maloomat ke liye hum se raabta karein.",
+        )
     record(
         session,
         tenant_id=req.tenant_id,
@@ -989,6 +1204,20 @@ def reject(session: Session, actor: Principal, request_id: uuid.UUID, reason: st
         entity_id=req.id,
         data={"reason": req.review_note},
     )
+    return req
+
+
+def mark_handled(session: Session, actor: Principal, request_id: uuid.UUID) -> AiOrderRequest:
+    actor.require("sales_order.create")
+    req = _get(session, actor, request_id)
+    if req.status != "message":
+        raise OrdexaError(ErrorCode.CONFLICT, "only shop messages can be marked as handled")
+    req.status = "closed"
+    req.review_note = f"Handled by {actor.username}"
+    req.reviewed_by = actor.user_id
+    req.reviewed_at = utcnow()
+    record(session, tenant_id=req.tenant_id, actor_user_id=actor.user_id, action="ai_order.message_handled",
+           entity_type="ai_order", entity_id=req.id, data={"number": req.number})  # fmt: skip
     return req
 
 

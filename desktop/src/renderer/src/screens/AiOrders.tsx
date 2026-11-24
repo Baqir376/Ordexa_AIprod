@@ -61,6 +61,8 @@ const STATUS_LABEL: Record<string, string> = {
   approved: 'Billed',
   rejected: 'Rejected',
   failed: 'Failed',
+  message: 'Message for you',
+  closed: 'Answered by bot',
 }
 const UPDATE_LABEL: Record<ShopUpdate['kind'], string> = {
   answered: 'Answered the question',
@@ -89,7 +91,7 @@ const ISSUE_TEXT: Record<string, string> = {
 
 export function AiOrders({ state }: { state: AppState }) {
   const perms = state.user?.permissions
-  const [filter, setFilter] = useState<'open' | 'approved' | 'rejected'>('open')
+  const [filter, setFilter] = useState<'open' | 'approved' | 'rejected' | 'closed'>('open')
   const list = useApi<Order[]>(`/api/v1/ai/orders?status=${filter}`, [filter])
   const [openId, setOpenId] = useState<string | null>(null)
   const [newOrder, setNewOrder] = useState(false)
@@ -107,8 +109,8 @@ export function AiOrders({ state }: { state: AppState }) {
           {can(perms, 'sales_order.create') && <button className="btn primary small" onClick={() => setNewOrder(true)}>+ Paste order</button>}
         </div>
         <div className="subtabs">
-          {(['open', 'approved', 'rejected'] as const).map((f) => (
-            <button key={f} className={filter === f ? 'active' : ''} onClick={() => setFilter(f)}>{f}</button>
+          {(['open', 'approved', 'rejected', 'closed'] as const).map((f) => (
+            <button key={f} className={filter === f ? 'active' : ''} onClick={() => setFilter(f)}>{f === 'closed' ? 'answered by bot' : f}</button>
           ))}
         </div>
         <ErrorBox error={list.error} />
@@ -187,7 +189,7 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
   }
 
   if (!order) return <div className="muted pad">Loading…</div>
-  const editable = !['approved', 'rejected', 'received', 'processing'].includes(order.status)
+  const editable = !['approved', 'rejected', 'received', 'processing', 'message', 'closed'].includes(order.status)
   const total = (order.lines ?? []).reduce((s, l) => s + (l.line_total ? Number(l.line_total) : 0), 0)
 
   return (
@@ -288,8 +290,15 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
         </div>
       )}
       <ErrorBox error={error} />
+      {order.status === 'message' && (
+        <div className="card pad">
+          <div>The shop sent a message (not an order). Reply to them on WhatsApp or call them, then mark it as handled.</div>
+          <button className="btn primary" disabled={busy} onClick={() => void act('/close')}>Mark as handled</button>
+        </div>
+      )}
+      {order.status === 'closed' && order.review_note && <div className="alert ok">{order.review_note}</div>}
       {order.invoice && <div className="alert ok">Billed as {order.invoice.number} · {rs(order.invoice.total)}</div>}
-      {order.review_note && <div className="alert warn">{order.review_note.startsWith('Cancelled by the shop') ? order.review_note : `Rejected: ${order.review_note}`}</div>}
+      {order.status === 'rejected' && order.review_note && <div className="alert warn">{order.review_note.startsWith('Cancelled by the shop') ? order.review_note : `Rejected: ${order.review_note}`}</div>}
       {editable && (
         <div className="approve-bar">
           <span>Total <b>{rs(total.toFixed(2))}</b></span>

@@ -32,6 +32,10 @@ STT_PROMPT = (
 MAX_RETRY_WAIT = 10.0  # seconds
 
 
+class RateLimited(RuntimeError):
+    """Free-tier per-minute limit: worth retrying in a minute (orders are read in the background anyway)."""
+
+
 def _retry_after(value: str | None) -> float | None:
     try:
         return max(float(value), 0.5) if value is not None else None
@@ -62,7 +66,7 @@ def _post(path: str, body: bytes, content_type: str, timeout: int = 60, _retry: 
             if _retry and wait is not None and wait <= MAX_RETRY_WAIT:
                 time.sleep(wait)
                 return _post(path, body, content_type, timeout, _retry=False)
-            raise RuntimeError(f"Groq free-tier rate limit reached; try again shortly ({detail})") from e
+            raise RateLimited(f"Groq free-tier rate limit reached; try again shortly ({detail})") from e
         raise RuntimeError(f"Groq API error {e.code}: {detail}") from e
     except urllib.error.URLError as e:
         raise RuntimeError(f"Groq unreachable: {e.reason}") from e
@@ -99,7 +103,8 @@ class GroqExtractor:
             "temperature": 0,
             "max_completion_tokens": 4000,
         }
-        res = _post("/chat/completions", json.dumps(body).encode(), "application/json")
+        res = _chat(body)
+        model = res.get("model") or model
         choice = res["choices"][0]
         if choice.get("finish_reason") == "length":
             raise RuntimeError("model output was cut off")
@@ -165,8 +170,20 @@ def chat_json(system: str, user: str, schema: dict, name: str) -> dict:
         "temperature": 0,
         "max_completion_tokens": 2000,
     }
-    res = _post("/chat/completions", json.dumps(body).encode(), "application/json")
+    res = _chat(body)
     choice = res["choices"][0]
     if choice.get("finish_reason") == "length":
         raise RuntimeError("model output was cut off")
     return json.loads(choice["message"]["content"] or "")
+
+
+def _chat(body: dict) -> dict:
+    """Chat call on the main text model; when that model's free-tier limit is reached, the same request goes once
+    to the fallback model (its own quota) before callers fall back to rules or retry later."""
+    try:
+        return _post("/chat/completions", json.dumps(body).encode(), "application/json")
+    except RateLimited:
+        fallback = get_settings().groq_fallback_model
+        if not fallback or body["model"] == fallback or body["model"] == get_settings().groq_vision_model:
+            raise
+        return _post("/chat/completions", json.dumps({**body, "model": fallback}).encode(), "application/json")

@@ -25,11 +25,10 @@ from sqlalchemy.orm import Session
 from ordexa.config import get_settings
 from ordexa.modules.ai import conversation
 from ordexa.modules.ai import service as ai
-from ordexa.modules.ai.models import AiAttachment
+from ordexa.modules.ai.models import AiAttachment, AiOrderRequest
 from ordexa.modules.audit.models import record
 from ordexa.modules.channels.models import WhatsappContact, WhatsappMessage, WhatsappNumber
 from ordexa.modules.customers.models import Customer
-from ordexa.modules.finance.service import balance
 from ordexa.modules.identity.service import Principal
 from ordexa.modules.jobs.models import Job
 from ordexa.modules.jobs.service import enqueue
@@ -384,8 +383,9 @@ def handle_inbound(
     if contact.state == "verified" and contact.customer_id:
         customer = session.get(Customer, contact.customer_id)
         if low in BALANCE:
-            owed = balance(session, tenant.id, "customer", customer.id)
-            reply(f"{customer.name}: aap ka baqaya (balance) Rs {owed:,.2f} hai.")
+            from ordexa.modules.ai.replies import balance_text
+
+            reply(balance_text(session, tenant.id, customer.id))
         elif low in HELP:
             reply(
                 f"{name}: order bhejne ke liye items aur quantity likhein, e.g. '10 box panadol, 5 patta brufen'.\n"
@@ -410,10 +410,33 @@ def handle_inbound(
                 sender=to,
             )
             inbound.ai_order_id = req.id
+            if created and conversation.ADD.search(t):
+                prev = session.scalar(
+                    select(AiOrderRequest)
+                    .where(
+                        AiOrderRequest.tenant_id == tenant.id,
+                        AiOrderRequest.sender == to,
+                        AiOrderRequest.id != req.id,
+                        AiOrderRequest.status.notin_(("closed", "message")),
+                    )
+                    .order_by(AiOrderRequest.received_at.desc())
+                    .limit(1)
+                )
+                if (
+                    prev is not None
+                    and prev.status == "approved"
+                    and prev.reviewed_at
+                    and prev.reviewed_at > utcnow() - timedelta(hours=6)
+                ):
+                    req.trace = (req.trace or []) + [{"step": "after_billed_order", "number": prev.number}]
             if created:
                 ai.run_inline_if_configured(session, req)
         return replies
 
+    if contact.state == "awaiting_choice" and low not in YES | NO and re.fullmatch(r"[A-Za-z]{0,3}-?\d{2,8}", t):
+        contact.state = "awaiting_code"  # typed the shop code straight away
+    elif contact.state == "awaiting_choice" and low.split(" ")[0] in YES:
+        low = "1"
     if contact.state in ("new",) or low in HELP:
         contact.state = "awaiting_choice"
         reply(
@@ -443,9 +466,9 @@ def handle_inbound(
         if customer is None:
             _fail(contact)
             reply(
-                "Yeh code nahi mila. Dobara check karke likhein, ya 2 likh kar naya account banayein."
-                if contact.state != "blocked"
-                else "Bohat ghalat koshishen. 1 ghante baad dobara try karein."
+                "Bohat ghalat koshishen. Aap ka number 1 ghante ke liye rok diya gaya hai, phir dobara try karein."
+                if contact.locked_until and contact.locked_until > utcnow()
+                else "Yeh code nahi mila. Dobara check karke likhein, ya 2 likh kar naya account banayein."
             )
             if low in NO:
                 contact.state = "awaiting_details"
@@ -493,9 +516,9 @@ def handle_inbound(
                 reply("Code expire ho gaya. Shop code dobara likhein.")
             else:
                 reply(
-                    "Code ghalat hai. Dobara likhein."
-                    if contact.state != "blocked"
-                    else "Bohat ghalat koshishen. 1 ghante baad dobara try karein."
+                    "Bohat ghalat koshishen. Aap ka number 1 ghante ke liye rok diya gaya hai, phir dobara try karein."
+                    if contact.locked_until and contact.locked_until > utcnow()
+                    else "Code ghalat hai. Dobara likhein."
                 )
     elif contact.state == "awaiting_details":
         contact.registration_details = t[:500]

@@ -37,8 +37,19 @@ def _ai_process(session: Session, job: Job) -> None:
     from ordexa.modules.ai.service import process_request
 
     request_id = uuid.UUID(job.payload["request_id"])
+    from ordexa.modules.ai.groq import RateLimited
+
     try:
-        process_request(session, request_id)
+        # While retries are left, a free-tier rate limit puts the job back for a later try (10 s, 20 s, 40 s ...).
+        process_request(session, request_id, defer_on_rate_limit=job.attempts < job.max_attempts)
+    except RateLimited:
+        session.rollback()
+        req = session.get(AiOrderRequest, request_id)
+        if req is not None:
+            req.status = "received"
+            req.error = "AI is busy (free-tier limit); retrying shortly"
+            session.commit()
+        raise
     except Exception as exc:
         # Record the failure on the order so staff see it (and can press "reprocess"); the job itself is retried
         # with backoff by run_one, and a retry reprocesses a request in the "failed" state.

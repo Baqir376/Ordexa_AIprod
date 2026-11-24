@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     ai_provider: str = "auto"  # auto | anthropic | groq | rules
     ai_model: str = "claude-opus-5-5"
     groq_model: str = "openai/gpt-oss-120b"  # text orders
+    # Used when the main model hits its free-tier limit (separate daily quota); "" turns the fallback off.
+    groq_fallback_model: str = "openai/gpt-oss-20b"
     groq_vision_model: str = "qwen/qwen3.8-27b"  # photo orders (Groq preview model; override if retired)
     groq_stt_model: str = "whisper-large-v3"  # voice notes
     # Free Groq key: read from GROQ_API_KEY (environment or backend/.env); never commit it.

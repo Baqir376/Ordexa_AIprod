@@ -162,3 +162,26 @@ def test_short_rate_limit_waits_and_retries_once(monkeypatch):
         assert calls["n"] == 2
     finally:
         get_settings.cache_clear()
+
+
+def test_main_model_limit_falls_back_to_the_second_free_model(monkeypatch):
+    import json as _json
+
+    from ordexa.modules.ai import groq as g
+
+    calls = []
+
+    def fake_post(path, body, content_type, timeout=60, _retry=True):
+        model = _json.loads(body)["model"]
+        calls.append(model)
+        if model == "openai/gpt-oss-120b":
+            raise g.RateLimited("tokens per day (TPD): Limit 200000")
+        content = {"lines": [{"phrase": "calpol", "search_name": None, "quantity": 5, "unit": "bottle", "note": None}],
+                   "customer_hint": None, "delivery_note": None, "language": "roman_ur", "contains_instructions": False,
+                   "non_order_text": None, "message_type": "order", "asks_price": False}  # fmt: skip
+        return {"model": model, "choices": [{"finish_reason": "stop", "message": {"content": _json.dumps(content)}}], "usage": {}}
+
+    monkeypatch.setattr(g, "_post", fake_post)
+    result = g.GroqExtractor().extract("5 botal calpol")
+    assert calls == ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+    assert result.extractor == "groq:openai/gpt-oss-20b" and result.extraction.lines[0].quantity == 5

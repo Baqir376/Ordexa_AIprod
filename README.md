@@ -11,6 +11,7 @@ A white-label ERP for Pakistani medicine distributors and chemists:
 | Decisions | [`docs/adr/`](docs/adr): platform and processes, data location, offline sync, pharma pilot, AI order desk, WhatsApp sign-up |
 | AI guardrails | [`docs/adr/0007-ai-guardrails.md`](docs/adr/0007-ai-guardrails.md): injection and hallucination guards, red-team results |
 | Test WhatsApp | [`docs/WHATSAPP_TESTING.md`](docs/WHATSAPP_TESTING.md): connect Meta's free test number in Settings and test from your phone |
+| Test the bot like a shop | [`docs/QA_CHAT_TESTING.md`](docs/QA_CHAT_TESTING.md): 50 tricky shop conversations against the live AI |
 | Deploy (free) | [`docs/DEPLOY.md`](docs/DEPLOY.md): Neon Postgres + Render, one container, `render.yaml` blueprint |
 | AI reference design | `../orderwise` (OrderWise) |
 

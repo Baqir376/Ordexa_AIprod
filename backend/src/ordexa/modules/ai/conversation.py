@@ -42,6 +42,7 @@ from ordexa.shared.db import utcnow
 log = logging.getLogger("ordexa.ai.conversation")
 
 CHANGE_WINDOW = timedelta(hours=24)
+UNDO_WINDOW = timedelta(hours=2)
 
 _W = r"(?<![\w])(?:{})(?![\w])"
 CORRECTION = re.compile(
@@ -69,6 +70,14 @@ THANKS = {
     "theek hai", "thik hai", "theek", "acha", "achha", "done", "great", "good", "👍", "🙏",
 }  # fmt: skip
 
+UNDO = re.compile(
+    _W.format(
+        r"cancel mat|cancel na|cancel nahi|cancel nai|mat cancel|na cancel|cancel mat karo|undo|wapas|wapis|"
+        r"dobara chalu|dobara shuru|restore|bhej (?:hi )?do|bhej dein|bhej hi dein|chalu kar"
+    ),
+    re.I,
+)
+
 MATCH_MIN = 0.6
 
 FOLLOWUP_SCHEMA = {
@@ -85,6 +94,9 @@ FOLLOWUP_SCHEMA = {
                 "new_order",
                 "thanks",
                 "question_for_staff",
+                "balance",
+                "bill_request",
+                "order_status",
                 "unclear",
             ],
         },
@@ -121,6 +133,9 @@ the shop's new message (English, Urdu, Roman Urdu or mixed). Decide what the sho
 - cancel_order: it cancels the whole order.
 - new_order: a separate new order (not a change to the open one).
 - thanks: thanks / ok / greeting with nothing to change.
+- balance: asks its balance / hisaab / baqaya.
+- bill_request: asks for its (last) bill / invoice.
+- order_status: asks about this order's status ("ho gaya?", "confirm hua?").
 - question_for_staff: a question a person must answer (delivery time, price, discount, payment, complaint).
 - unclear: none of the above.
 
@@ -148,7 +163,14 @@ def open_order(session: Session, tenant_id, sender: str) -> AiOrderRequest | Non
         .order_by(AiOrderRequest.received_at.desc())
         .limit(1)
     )
-    return latest if latest is not None and latest.status in ("needs_review", "draft_ready") else None
+    if latest is None:
+        return None
+    if latest.status in ("needs_review", "draft_ready"):
+        return latest
+    cancelled = latest.status == "rejected" and (latest.review_note or "").startswith("Cancelled by the shop")
+    if cancelled and latest.reviewed_at and latest.reviewed_at >= utcnow() - UNDO_WINDOW:
+        return latest  # only an "undo" message reopens it (see handle_reply)
+    return None
 
 
 def is_thanks(text: str) -> bool:
@@ -220,6 +242,22 @@ def handle_reply(session: Session, req: AiOrderRequest, text: str) -> str | None
         ]
         _note(req, "shop_message_for_staff", text, reason="instructions")
         return "Shukriya! Hamari team aap ka message dekh kar raabta karegi."
+    if req.status == "rejected":  # cancelled by the shop a moment ago
+        if not UNDO.search(text):
+            return None
+        # "nahi cancel mat karo, bhej do" reopens it; "5 box risek bhej do" is a new order, not an undo.
+        from ordexa.modules.ai.extract import RuleExtractor
+
+        if any(ln.quantity for ln in RuleExtractor().extract(UNDO.sub(" ", text)).extraction.lines):
+            return None
+        return restore(session, req, text)
+    asking = req.status == "needs_review" and bool(req.questions)
+    low = re.sub(r"[\s.!]+", " ", text.lower()).strip()
+    if asking and low in ai.YES_WORDS | ai.NO_WORDS:
+        return ai.apply_customer_answer(session, req, text)
+    if low in ai.YES_WORDS:  # "haan" / "ji" with no open question: an acknowledgement, never a new item
+        _note(req, "shop_thanks", text)
+        return f"Ji, order {req.number} par kaam ho raha hai, bill jald bhej dein ge."
     if is_thanks(text):
         _note(req, "shop_thanks", text)
         return f"Shukriya! Order {req.number} par kaam ho raha hai, bill jald bhej dein ge."
@@ -269,6 +307,8 @@ def _understand_with_ai(session: Session, req: AiOrderRequest, text: str) -> str
         return cancel(session, req, text)
     if intent == "thanks":
         return f"Shukriya! Order {req.number} par kaam ho raha hai, bill jald bhej dein ge."
+    if intent in ("balance", "bill_request", "order_status"):
+        return quick_answer(session, req, intent, text)
     if intent == "question_for_staff":
         req.warnings = (req.warnings or []) + [{"code": "shop_question", "message": f"Shop asks: {text[:200]}"}]
         _note(req, "shop_message_for_staff", text, reason="question")
@@ -325,6 +365,11 @@ def _qty_in(text: str, q: float) -> bool:
 
 
 def _understand_with_rules(session: Session, req: AiOrderRequest, text: str) -> str | None:
+    from ordexa.modules.ai.extract import rule_message_type
+
+    kind, _ = rule_message_type(text, False)
+    if kind in ("balance", "bill_request") and not any(ln.quantity for ln in extract_order(text).extraction.lines):
+        return quick_answer(session, req, kind, text)
     has_markers = bool(CORRECTION.search(text) or REMOVE.search(text) or ADD.search(text) or SET_QTY.search(text))
     asking = req.status == "needs_review" and bool(req.questions)
     if asking and not has_markers and ai.looks_like_answer(req, text):
@@ -436,6 +481,41 @@ def _apply(session: Session, req: AiOrderRequest, text: str, lines: list[dict], 
         data={"number": req.number, "changes": changed, "status": req.status},
     )
     return after_change_reply(req, "Theek hai: " + " ".join(changed))
+
+
+def quick_answer(session: Session, req: AiOrderRequest, kind: str, text: str) -> str:
+    """Balance, last bill or this order's status, answered from the database while an order is open."""
+    from ordexa.modules.ai import replies
+
+    _note(req, "shop_thanks" if kind == "order_status" else "shop_message_for_staff", text, reason=kind)
+    if kind == "balance" and req.customer_id:
+        return replies.balance_text(session, req.tenant_id, req.customer_id)
+    if kind == "bill_request":
+        none = replies.send_bill(session, req)
+        return none or f"Aap ka aakhri bill bhej diya hai. Order {req.number} ka bill confirm hote hi aa jayega."
+    q = ai.first_question(req)
+    if q:
+        return f"Order {req.number} aap ke jawab ka intezar kar raha hai:\n{q}"
+    return f"Order {req.number} {replies.STATUS_TEXT.get(req.status, 'check ho raha hai')}:\n{summary(req)}"
+
+
+def restore(session: Session, req: AiOrderRequest, text: str) -> str:
+    """Undo the shop's own cancel (within UNDO_WINDOW): re-run every check and reopen the order."""
+    keep = {ln["line_no"]: ln for ln in req.lines if ln.get("resolution") in ("operator", "customer")}
+    req.review_note = None
+    req.reviewed_at = None
+    req.status = "needs_review"
+    _note(req, "restored_by_shop", text)
+    ai.evaluate(session, req, Extraction.model_validate(req.extraction), keep=keep)
+    record(
+        session,
+        tenant_id=req.tenant_id,
+        action="ai_order.restored_by_shop",
+        entity_type="ai_order",
+        entity_id=req.id,
+        data={"number": req.number},
+    )
+    return after_change_reply(req, f"Theek hai, order {req.number} dobara chalu kar diya.")
 
 
 def cancel(session: Session, req: AiOrderRequest, text: str) -> str:

@@ -124,11 +124,21 @@ def list_orders(
 ):
     q = select(AiOrderRequest).where(AiOrderRequest.tenant_id == p.tenant_id)
     if status == "open":
-        q = q.where(AiOrderRequest.status.in_(("received", "processing", "needs_review", "draft_ready", "failed")))
+        q = q.where(AiOrderRequest.status.in_(("received", "processing", "needs_review", "draft_ready", "failed", "message")))
     elif status:
         q = q.where(AiOrderRequest.status == status)
     q = q.order_by(AiOrderRequest.received_at.desc()).limit(200)
     return [out(session, r, full=False) for r in session.scalars(q)]
+
+
+@router.post("/orders/{request_id}/close")
+def close_message(
+    request_id: uuid.UUID, p: Principal = Depends(requires("sales_order.create")), session: Session = Depends(get_session)
+):
+    """Staff dealt with a shop's message (complaint / question): take it off the open list."""
+    req = service.mark_handled(session, p, request_id)
+    session.commit()
+    return out(session, req)
 
 
 @router.get("/orders/{request_id}")
