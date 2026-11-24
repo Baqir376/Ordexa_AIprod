@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 
 import { formatRs, toPaisa } from '../../core/money'
 import { ordexa } from './bridge'
+import { Icon } from './icons'
 
 export const uid = (): string => crypto.randomUUID()
 /** Local calendar date on this PC (Pakistan time), not the UTC date. */
@@ -154,14 +155,26 @@ const PAGE_HELP: [string, string][] = [
   ['WhatsApp sign-ups', 'Shops asking to order on WhatsApp. Approve a number to link it to a customer.'],
 ]
 
+const PAGE_ICON: [string, string, string][] = [
+  ['Dashboard', 'dashboard', 'indigo'], ['Customers', 'customers', 'sky'], ['Products', 'products', 'emerald'],
+  ['Purchases', 'purchases', 'amber'], ['Suppliers', 'suppliers', 'violet'], ['Sales returns', 'returns', 'rose'],
+  ['Cheques', 'cheques', 'teal'], ['Expenses', 'expenses', 'amber'], ['Reports', 'reports', 'indigo'],
+  ['Staff', 'staff', 'violet'], ['Settings', 'settings', 'slate'], ['WhatsApp sign-ups', 'registrations', 'emerald'],
+  ['Bills', 'bills', 'sky'],
+]
+
 export function Page({ title, subtitle, actions, children }: { title: string; subtitle?: string; actions?: ReactNode; children: ReactNode }) {
   const help = subtitle ?? PAGE_HELP.find(([k]) => title.startsWith(k))?.[1]
+  const ico = PAGE_ICON.find(([k]) => title.startsWith(k))
   return (
     <div className="page">
       <div className="page-head">
-        <div>
-          <h1>{title}</h1>
-          {help && <div className="page-sub">{help}</div>}
+        <div className="page-title">
+          {ico && <span className={`page-ico hue-${ico[2]}`}><Icon name={ico[1]} size={20} /></span>}
+          <div>
+            <h1>{title}</h1>
+            {help && <div className="page-sub">{help}</div>}
+          </div>
         </div>
         <div className="page-actions">{actions}</div>
       </div>
@@ -239,4 +252,46 @@ export function Stat({ label, value, tone }: { label: string; value: ReactNode; 
 
 export function can(perms: string[] | undefined, p: string): boolean {
   return Boolean(perms?.includes(p))
+}
+
+
+/** A row of headline figures for a page (glass tiles with an icon). */
+export function Figures({ items }: { items: { label: string; value: ReactNode; icon: string; hue: string; hint?: string; onClick?: () => void; active?: boolean }[] }) {
+  return (
+    <div className="figures">
+      {items.map((f) => (
+        <button key={f.label} type="button" className={`figure tilt hue-${f.hue} ${f.onClick ? 'clickable' : ''} ${f.active ? 'active' : ''}`} onClick={f.onClick} disabled={!f.onClick}>
+          <span className="figure-ico"><Icon name={f.icon} size={18} /></span>
+          <span className="figure-body">
+            <span className="figure-label">{f.label}</span>
+            <span className="figure-value">{f.value}</span>
+            {f.hint && <span className="figure-hint">{f.hint}</span>}
+          </span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** Filter chips: one choice from a short list. */
+export function Chips<T extends string>({ value, options, onChange }: { value: T; options: [T, string, number?][]; onChange: (v: T) => void }) {
+  return (
+    <div className="chips-row" role="tablist">
+      {options.map(([k, label, n]) => (
+        <button key={k} role="tab" aria-selected={value === k} className={`chip-btn ${value === k ? 'active' : ''}`} onClick={() => onChange(k)}>
+          {label}
+          {n !== undefined && <span className="chip-count">{n}</span>}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** Coloured initials tile for a product or a shop. */
+export function Monogram({ text, hue }: { text: string; hue?: string }) {
+  const words = text.replace(/[^\p{L}\p{N} ]/gu, ' ').trim().split(/\s+/).filter(Boolean)
+  const ini = ((words[0]?.[0] ?? '#') + (words[1]?.[0] ?? '')).toUpperCase()
+  const hues = ['indigo', 'sky', 'emerald', 'amber', 'violet', 'rose', 'teal']
+  const h = hue ?? hues[[...text].reduce((a, c) => a + c.charCodeAt(0), 0) % hues.length]
+  return <span className={`mono hue-${h}`}>{ini}</span>
 }

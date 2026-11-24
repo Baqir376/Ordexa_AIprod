@@ -2,7 +2,7 @@ import { useState } from 'react'
 
 import type { AppState } from '../../../core/types'
 import { ordexa } from '../bridge'
-import { ErrorBox, Field, Modal, Page, Table, can, qtyText, rs, uid, useAction, useApi } from '../ui'
+import { Chips, ErrorBox, Field, Figures, Modal, Monogram, Page, Table, can, qtyText, rs, uid, useAction, useApi } from '../ui'
 
 interface Product {
   id: string
@@ -20,15 +20,30 @@ interface Product {
 }
 interface StockRow { product_id: string; batch_id: string | null; batch_no: string | null; expiry_date: string | null; on_hand: string; cost_price: string | null; value: string | null }
 
+type StockFilter = 'all' | 'low' | 'out' | 'inactive'
+
 export function Products({ state }: { state: AppState }) {
   const perms = state.user?.permissions
   const [q, setQ] = useState('')
+  const [filter, setFilter] = useState<StockFilter>('all')
   const list = useApi<Product[]>(`/api/v1/products?q=${encodeURIComponent(q)}`, [q])
   const stock = useApi<StockRow[]>('/api/v1/reports/stock')
   const [editing, setEditing] = useState<Partial<Product> | null>(null)
   const [detail, setDetail] = useState<Product | null>(null)
   const totals = new Map<string, number>()
-  for (const s of stock.data ?? []) totals.set(s.product_id, (totals.get(s.product_id) ?? 0) + Number(s.on_hand))
+  let value = 0
+  for (const s of stock.data ?? []) {
+    totals.set(s.product_id, (totals.get(s.product_id) ?? 0) + Number(s.on_hand))
+    value += Number(s.value ?? 0)
+  }
+  const all = list.data ?? []
+  const onHand = (p: Product) => totals.get(p.id) ?? 0
+  const isOut = (p: Product) => p.is_active && onHand(p) <= 0
+  const isLow = (p: Product) => p.is_active && !isOut(p) && p.reorder_level !== null && onHand(p) <= Number(p.reorder_level)
+  const counts = { low: all.filter(isLow).length, out: all.filter(isOut).length, inactive: all.filter((p) => !p.is_active).length }
+  const rows = list.data
+    ? all.filter((p) => (filter === 'low' ? isLow(p) : filter === 'out' ? isOut(p) : filter === 'inactive' ? !p.is_active : true))
+    : null
 
   return (
     <Page
@@ -40,17 +55,65 @@ export function Products({ state }: { state: AppState }) {
         </>
       }
     >
+      <Figures
+        items={[
+          { label: 'Products', value: all.length.toLocaleString('en-PK'), icon: 'products', hue: 'indigo', hint: `${all.length - counts.inactive} active`, onClick: () => setFilter('all'), active: filter === 'all' },
+          { label: 'Stock value (at cost)', value: rs(value.toFixed(2)), icon: 'expenses', hue: 'emerald', hint: 'All batches on hand' },
+          { label: 'Low stock', value: counts.low, icon: 'alert', hue: 'amber', hint: 'At or below reorder level', onClick: () => setFilter('low'), active: filter === 'low' },
+          { label: 'Out of stock', value: counts.out, icon: 'xCircle', hue: 'rose', hint: 'Nothing left to sell', onClick: () => setFilter('out'), active: filter === 'out' },
+        ]}
+      />
+      <Chips
+        value={filter}
+        onChange={setFilter}
+        options={[['all', 'All products', all.length], ['low', 'Low stock', counts.low], ['out', 'Out of stock', counts.out], ['inactive', 'Inactive', counts.inactive]]}
+      />
       <ErrorBox error={list.error ?? stock.error} />
       <Table
-        rows={list.data}
+        rows={rows}
         onRow={(p) => setDetail(p)}
+        empty={filter === 'all' ? 'No products yet.' : 'Nothing here. Good news.'}
         columns={[
-          { key: 'code', label: 'Code' },
-          { key: 'name', label: 'Product', render: (p) => <>{p.name}<div className="muted small">{[p.generic_name, p.manufacturer, p.pack_size].filter(Boolean).join(' · ')}</div></> },
-          { key: 'sale_price', label: 'Price', num: true, render: (p) => `${rs(p.sale_price)} / ${p.sale_unit}` },
-          { key: 'stock', label: 'In stock', num: true, render: (p) => { const t = totals.get(p.id) ?? 0; const low = p.reorder_level !== null && t <= Number(p.reorder_level); return <span className={low ? 'bad-text' : ''}>{t}</span> } },
+          {
+            key: 'name',
+            label: 'Product',
+            render: (p) => (
+              <span className="cell-main">
+                <Monogram text={p.name} />
+                <span>
+                  <b>{p.name}</b>
+                  <span className="cell-sub">{[p.code, p.generic_name, p.manufacturer, p.pack_size].filter(Boolean).join(' · ')}</span>
+                </span>
+              </span>
+            ),
+          },
+          { key: 'sale_price', label: 'Price', num: true, render: (p) => <span className="price-tag">{rs(p.sale_price)}<small>/ {p.sale_unit}</small></span> },
+          {
+            key: 'stock',
+            label: 'Stock',
+            render: (p) => {
+              const t = onHand(p)
+              const re = Number(p.reorder_level ?? 0)
+              const pct = Math.min(100, (t / Math.max(1, re * 4)) * 100)
+              const tone = isOut(p) ? 'out' : isLow(p) ? 'low' : 'ok'
+              return (
+                <span className={`meter-cell tone-${tone}`}>
+                  <span className="meter"><i style={{ width: `${tone === 'out' ? 0 : Math.max(4, pct)}%` }} /></span>
+                  <span className="meter-num">{t.toLocaleString('en-PK')} <small>{p.sale_unit}</small></span>
+                </span>
+              )
+            },
+          },
           { key: 'reorder_level', label: 'Reorder at', num: true, render: (p) => qtyText(p.reorder_level) },
-          { key: 'status', label: '', render: (p) => (!p.is_active ? <span className="tag rejected">inactive</span> : null) },
+          {
+            key: 'status',
+            label: 'Status',
+            render: (p) =>
+              !p.is_active ? <span className="status s-muted">Inactive</span>
+                : isOut(p) ? <span className="status s-bad">Out of stock</span>
+                : isLow(p) ? <span className="status s-warn">Reorder</span>
+                : <span className="status s-ok">In stock</span>,
+          },
         ]}
       />
       {editing && <ProductForm initial={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); void list.reload() }} />}

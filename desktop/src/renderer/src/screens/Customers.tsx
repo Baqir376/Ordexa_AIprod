@@ -2,7 +2,7 @@ import { useState } from 'react'
 
 import type { AppState } from '../../../core/types'
 import { ordexa } from '../bridge'
-import { ErrorBox, Field, Modal, Page, Table, can, rs, today, uid, useAction, useApi } from '../ui'
+import { ErrorBox, Field, Figures, Modal, Monogram, Page, Table, can, rs, today, uid, useAction, useApi } from '../ui'
 
 interface Customer {
   id: string
@@ -25,6 +25,9 @@ export function Customers({ state }: { state: AppState }) {
   const [ledgerFor, setLedgerFor] = useState<Customer | null>(null)
   const [paying, setPaying] = useState<Customer | null>(null)
   const bal = new Map((aging.data ?? []).map((a) => [a.party_id, a]))
+  const owedTotal = (aging.data ?? []).reduce((t, a) => t + Math.max(0, Number(a.balance)), 0)
+  const over90 = (aging.data ?? []).reduce((t, a) => t + Number(a.over_90), 0)
+  const overLimit = (list.data ?? []).filter((c) => c.credit_limit && Number(bal.get(c.id)?.balance ?? 0) > Number(c.credit_limit)).length
 
   return (
     <Page
@@ -40,15 +43,47 @@ export function Customers({ state }: { state: AppState }) {
         </>
       }
     >
+      <Figures
+        items={[
+          { label: 'Shops', value: (list.data ?? []).length, icon: 'customers', hue: 'sky', hint: `${(list.data ?? []).filter((c) => c.is_active).length} active` },
+          { label: 'Shops owe you', value: rs(owedTotal.toFixed(2)), icon: 'expenses', hue: 'indigo', hint: `${(aging.data ?? []).filter((a) => Number(a.balance) > 0).length} shops with a balance` },
+          { label: 'Over credit limit', value: overLimit, icon: 'alert', hue: 'amber', hint: 'Balance above the agreed limit' },
+          { label: 'Older than 90 days', value: rs(over90.toFixed(2)), icon: 'clock', hue: 'rose', hint: 'Follow up these payments' },
+        ]}
+      />
       <ErrorBox error={list.error} />
       <Table
         rows={list.data}
         columns={[
-          { key: 'code', label: 'Code' },
-          { key: 'name', label: 'Name', render: (c) => <>{c.name}{!c.is_active && <span className="tag rejected">inactive</span>}</> },
-          { key: 'phone', label: 'Phone' },
-          { key: 'credit_limit', label: 'Credit limit', num: true, render: (c) => (c.credit_limit ? rs(c.credit_limit) : 'No limit') },
-          { key: 'balance', label: 'Balance', num: true, render: (c) => rs(bal.get(c.id)?.balance ?? '0') },
+          {
+            key: 'name',
+            label: 'Shop',
+            render: (c) => (
+              <span className="cell-main">
+                <Monogram text={c.name} />
+                <span>
+                  <b>{c.name}</b>
+                  <span className="cell-sub">{[`Code ${c.code}`, c.phone, c.address].filter(Boolean).join(' · ')}{!c.is_active && ' · inactive'}</span>
+                </span>
+              </span>
+            ),
+          },
+          {
+            key: 'balance',
+            label: 'Balance',
+            render: (c) => {
+              const b = Number(bal.get(c.id)?.balance ?? 0)
+              const lim = c.credit_limit ? Number(c.credit_limit) : null
+              const pct = lim ? Math.min(100, (b / lim) * 100) : 0
+              const tone = lim && b > lim ? 'out' : lim && pct > 75 ? 'low' : 'ok'
+              return (
+                <span className={`meter-cell tone-${tone}`}>
+                  <span className="meter-num"><b>{rs(b.toFixed(2))}</b> <small>{lim ? `of ${rs(c.credit_limit)}` : 'no limit'}</small></span>
+                  {lim !== null && <span className="meter"><i style={{ width: `${Math.max(3, pct)}%` }} /></span>}
+                </span>
+              )
+            },
+          },
           { key: 'over_90', label: 'Over 90 days', num: true, render: (c) => { const v = bal.get(c.id)?.over_90; return v && v !== '0.00' ? <span className="bad-text">{rs(v)}</span> : '' } },
           {
             key: 'actions',

@@ -426,185 +426,216 @@ function OrderDetail({ id, state, onChanged, onDeleted }: { id: string; state: A
     await act('/approve', { acknowledge_warnings: soft, new_bill: newBill })
   }
 
-  if (!order) return <div className="muted pad">Loading…</div>
+  if (!order) return <div className="od-loading"><span className="spinner" /> Loading order…</div>
   const editable = !['approved', 'rejected', 'received', 'processing', 'message', 'closed'].includes(order.status)
-  const total = (order.lines ?? []).reduce((s, l) => s + (l.line_total ? Number(l.line_total) : 0), 0)
+  const lines = order.lines ?? []
+  const total = lines.reduce((s, l) => s + (l.line_total ? Number(l.line_total) : 0), 0)
+  const fixes = lines.filter((l) => l.issues.some((i) => i !== 'insufficient_stock')).length
+  const canApprove = can(perms, 'sales_order.approve')
+  const who = order.customer?.name ?? order.sender ?? 'Unknown sender'
+  const ask = order.questions?.[0]
+  const next =
+    order.status === 'received' || order.status === 'processing'
+      ? { tone: 'reading', icon: 'sparkle', title: 'The AI is reading this order', text: 'This usually takes a few seconds.' }
+      : order.status === 'message'
+        ? { tone: 'message', icon: 'message', title: 'This is a message, not an order', text: 'Answer the shop in “Chat with shop”, then mark it as handled.' }
+        : order.status === 'approved'
+          ? { tone: 'billed', icon: 'checkCircle', title: `Billed as ${order.invoice?.number ?? ''}`, text: 'The shop received the bill on WhatsApp.' }
+          : order.status === 'rejected'
+            ? { tone: 'muted', icon: 'xCircle', title: order.review_note?.startsWith('Cancelled by the shop') ? 'Cancelled by the shop' : 'Rejected', text: order.review_note ?? '' }
+            : order.status === 'closed'
+              ? { tone: 'muted', icon: 'bot', title: 'Answered by the bot', text: order.review_note ?? 'Nothing for you to do.' }
+              : !order.customer
+                ? { tone: 'fix', icon: 'alert', title: 'Link this message to a customer', text: 'Pick the shop below so the bill goes to the right account.' }
+                : order.status === 'draft_ready'
+                  ? {
+                      tone: 'ready',
+                      icon: 'checkCircle',
+                      title: order.add_to_bill?.possible ? `Ready to update bill ${order.add_to_bill.number}` : 'Everything checks out',
+                      text: order.add_to_bill?.possible
+                        ? 'Approve to revise that same bill; the shop gets the complete updated bill on WhatsApp.'
+                        : `Approve to create the bill for ${rs(total.toFixed(2))} and send it to the shop on WhatsApp.`,
+                    }
+                  : ask && fixes
+                    ? { tone: 'waiting', icon: 'clock', title: 'Waiting for the shop to answer', text: `The bot asked: “${ask.split('\n')[0]}” You can also fix it yourself below.` }
+                    : { tone: 'fix', icon: 'alert', title: `${fixes} item${fixes === 1 ? '' : 's'} need${fixes === 1 ? 's' : ''} you`, text: 'Choose the right product or confirm the quantity on the highlighted items.' }
+  const resolvedBy = (l: Line) =>
+    l.resolution === 'alias' ? 'remembered for this shop' : l.resolution === 'operator' ? 'chosen by staff' : l.resolution === 'customer' ? 'confirmed by the shop' : 'matched by AI'
 
   return (
-    <div className="page">
-      <div className="card order-head">
-        <div>
-          <h1>{order.customer ? order.customer.name : 'Customer not linked'}</h1>
-          <div className="meta">
-            <span>{order.number}</span>
-            {order.customer && <span>Shop code {order.customer.code}</span>}
-            <span>{order.source === 'whatsapp' ? `WhatsApp ${order.sender ?? ''}` : 'Typed by staff'}</span>
-            <span>{new Date(order.received_at).toLocaleString('en-PK')}</span>
+    <div className="od">
+      <section className="od-hero card">
+        <div className="od-who">
+          <span className={`od-avatar ${order.customer ? '' : 'stranger'}`}>{initials(who)}</span>
+          <div>
+            <h1>{who}</h1>
+            <div className="od-meta">
+              <span className="pill-mini">{order.number}</span>
+              {order.customer && <span>Shop {order.customer.code}</span>}
+              <span>{order.source === 'whatsapp' ? order.sender : 'Typed by staff'}</span>
+              <span>{new Date(order.received_at).toLocaleString('en-PK', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}</span>
+            </div>
           </div>
         </div>
-        <div className="head-side">
-          <span className={`stage-chip tone-${stageOf(order).tone}`}><i />{stageOf(order).label}</span>
-          {can(perms, 'sales_order.approve') && order.status !== 'approved' && (
-            <button className="btn small ghost" title="Delete junk" onClick={() => void remove()}><Icon name="trash" size={14} /> Delete</button>
+        <div className="od-actions">
+          {editable && canApprove && (
+            <button className="btn primary big" disabled={busy || order.status !== 'draft_ready'} onClick={() => void approve()} title={order.status !== 'draft_ready' ? 'Fix the highlighted items first' : 'Create the bill'}>
+              <Icon name="checkCircle" size={17} />
+              {order.add_to_bill?.possible ? `Update bill ${order.add_to_bill.number}` : 'Approve & bill'}
+            </button>
+          )}
+          {editable && <button className="btn" onClick={() => setReject('')}>Reject</button>}
+          {editable && canApprove && order.add_to_bill?.possible && (
+            <button className="btn ghost" disabled={busy || order.status !== 'draft_ready'} onClick={() => void approve(true)}>Separate bill</button>
+          )}
+          {canApprove && order.status !== 'approved' && (
+            <button className="icon-btn" title="Delete (spam, test or not an order)" onClick={() => void remove()}><Icon name="trash" size={16} /></button>
+          )}
+          {!editable && order.status === 'message' && (
+            <button className="btn primary" disabled={busy} onClick={() => void act('/close')}><Icon name="check" size={16} /> Mark as handled</button>
           )}
         </div>
         <OrderSteps status={order.status} />
-        {order.source === 'whatsapp' && order.sender && (
-          <div className="seg pane-switch">
-            <button className={pane === 'order' ? 'active' : ''} onClick={() => setPane('order')}><Icon name="receipt" size={15} /> Order</button>
-            <button className={pane === 'chat' ? 'active' : ''} onClick={() => setPane('chat')}><Icon name="message" size={15} /> Chat with shop</button>
-          </div>
-        )}
+      </section>
+
+      <div className={`od-next tone-${next.tone}`}>
+        <span className="od-next-ico"><Icon name={next.icon} size={18} /></span>
+        <div>
+          <b>{next.title}</b>
+          {next.text && <p>{next.text}</p>}
+        </div>
+        {editable && <span className="od-total"><small>Total</small>{rs(total.toFixed(2))}</span>}
       </div>
+      {flash && <div className="alert ok">The shop just updated this order on WhatsApp.</div>}
+      <ErrorBox error={error} />
+
+      {order.source === 'whatsapp' && order.sender && (
+        <div className="seg pane-switch">
+          <button className={pane === 'order' ? 'active' : ''} onClick={() => setPane('order')}><Icon name="receipt" size={15} /> Order</button>
+          <button className={pane === 'chat' ? 'active' : ''} onClick={() => setPane('chat')}><Icon name="message" size={15} /> Chat with shop</button>
+        </div>
+      )}
+
       {pane === 'chat' && order.sender ? (
         <div className="card chat-card"><ChatThread phone={order.sender} perms={perms} compact /></div>
       ) : (
-      <>
-      <div className="message-bubble">
-        <div className="muted small">Shop wrote</div>
-        {order.raw_text.startsWith('[') && order.kind !== 'text' ? null : order.raw_text}
-        {order.has_attachment && <Attachment orderId={order.id} kind={order.kind ?? 'text'} />}
-        {order.transcript && <div className="transcript"><span className="muted small">Heard in the voice note:</span> {order.transcript}</div>}
-      </div>
-      {flash && <div className="alert ok">The shop just updated this order on WhatsApp. See below.</div>}
-      {(order.shop_updates?.length ?? 0) > 0 && (
-        <div className="card pad shop-updates">
-          <div className="muted small">Updates from the shop on WhatsApp</div>
-          <ul>
-            {order.shop_updates!.map((u, i) => (
-              <li key={i} className={`upd upd-${u.kind}`}>
-                <span className="muted small">{u.at ? new Date(u.at).toLocaleTimeString('en-PK') : ''}</span>{' '}
-                <b>{UPDATE_LABEL[u.kind]}</b>
-                {u.message && <span>: “{u.message}”</span>}
-                {u.changes.length > 0 && <div className="small">{u.changes.join(' ')}</div>}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {order.warnings.map((w) => <div key={w.code} className={`alert ${w.code === 'contains_instructions' ? 'error' : 'warn'}`}>{w.message}</div>)}
-      {order.status === 'received' || order.status === 'processing' ? (
-        <div className="muted">The AI worker is reading this order…</div>
-      ) : (
-        <table className="lines">
-          <thead><tr><th>#</th><th>Customer wrote</th><th>Product</th><th className="num">Qty</th><th className="num">Rate</th><th className="num">Amount</th><th className="num">Stock</th><th /></tr></thead>
-          <tbody>
-            {(order.lines ?? []).map((l) => {
-              const blocking = l.issues.filter((i) => i !== 'insufficient_stock')
-              return (
-                <tr key={l.line_no} className={blocking.length ? 'row-attention' : ''}>
-                  <td>{l.line_no}</td>
-                  <td>
-                    <b>{l.phrase}</b>
-                    {l.read_as && <div className="muted small">read as “{l.read_as}”</div>}
-                    <div className="muted small">{l.quantity ?? '?'} {l.unit ?? ''}</div>
-                  </td>
-                  <td>
-                    {l.product_name ? (
-                      <>
-                        {l.product_name}
-                        <div className="muted small">{l.resolution === 'alias' ? `remembered for this shop (v${l.alias_version})` : l.resolution === 'operator' ? 'chosen by staff' : l.resolution === 'customer' ? 'confirmed by the shop' : 'matched catalogue'}</div>
-                      </>
-                    ) : null}
-                    {l.issues.map((i) => <div key={i} className={i === 'insufficient_stock' ? 'warn-text small' : 'bad-text small'}>{ISSUE_TEXT[i] ?? i}</div>)}
-                    {editable && (l.issues.includes('ambiguous') || l.issues.includes('not_found')) && (
-                      <div className="cand-row">
-                        {l.candidates.map((c) => (
-                          <button key={c.product_id} className="btn small" disabled={busy} onClick={() => void act('/resolve-line', { line_no: l.line_no, product_id: c.product_id, remember })}>
-                            {c.name}
-                          </button>
-                        ))}
-                        <ProductPicker onPick={(p) => void act('/resolve-line', { line_no: l.line_no, product_id: p.id, remember })} />
-                      </div>
-                    )}
-                  </td>
-                  <td className="num">
-                    {editable && (l.issues.includes('missing_quantity') || l.issues.includes('unit_mismatch')) ? (
-                      <span className="qty-fix">
-                        <input className="num-in" placeholder={l.sale_unit ?? 'qty'} value={qtyEdit[l.line_no] ?? ''} onChange={(e) => setQtyEdit({ ...qtyEdit, [l.line_no]: e.target.value })} />
-                        <button className="btn small" disabled={!qtyEdit[l.line_no] || busy} onClick={() => void act('/resolve-line', { line_no: l.line_no, quantity: qtyEdit[l.line_no] })}>OK</button>
-                      </span>
-                    ) : (
-                      <>{l.quantity ?? '—'} {l.sale_unit ?? ''}</>
-                    )}
-                  </td>
-                  <td className="num">{rs(l.unit_price)}</td>
-                  <td className="num">{rs(l.line_total)}</td>
-                  <td className="num">{l.available ? Number(l.available) : '—'}</td>
-                  <td>{editable && <button className="x" title="Remove line" onClick={() => void act(`/lines/${l.line_no}/remove`)}>×</button>}</td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      )}
-      {editable && (
-        <div className="desk-tools">
-          <label className="check"><input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} disabled={!can(perms, 'ai_alias.approve')} /> Remember my product choices for this shop</label>
-          <button className="btn small" onClick={() => setAdding(true)}>+ Add item</button>
-          {!order.customer && <CustomerLinker onPick={(c) => void act('/customer', { customer_id: c.id })} />}
-        </div>
-      )}
-      {order.questions && order.questions.length > 0 && editable && (
-        <div className="card pad">
-          <div className="muted small">Questions sent to the customer on WhatsApp:</div>
-          <ul className="small">{order.questions.map((q, i) => <li key={i}>{q}</li>)}</ul>
-        </div>
-      )}
-      <ErrorBox error={error} />
-      {order.status === 'message' && (
-        <div className="card pad">
-          <div>The shop sent a message (not an order). Reply to them on WhatsApp or call them, then mark it as handled.</div>
-          <button className="btn primary" disabled={busy} onClick={() => void act('/close')}>Mark as handled</button>
-        </div>
-      )}
-      {order.status === 'closed' && order.review_note && <div className="alert ok">{order.review_note}</div>}
-      {order.invoice && <div className="alert ok">Billed as {order.invoice.number} · {rs(order.invoice.total)}</div>}
-      {order.status === 'rejected' && order.review_note && <div className="alert warn">{order.review_note.startsWith('Cancelled by the shop') ? order.review_note : `Rejected: ${order.review_note}`}</div>}
-      {editable && order.add_to_bill && (
-        <div className={`revision card ${order.add_to_bill.possible ? '' : 'blocked'}`}>
-          <div className="revision-head">
-            <span className="revision-ico"><Icon name="receipt" size={18} /></span>
-            <div>
-              <b>{order.add_to_bill.possible ? `Change to bill ${order.add_to_bill.number}` : `Bill ${order.add_to_bill.number} can no longer change`}</b>
-              <div className="muted small">
-                {order.add_to_bill.possible
-                  ? 'The shop asked to change a bill from the last business day. Approving revises that same bill and sends the shop the complete updated bill.'
-                  : `${order.add_to_bill.reason}. Approving makes a separate bill.`}
+        <>
+          {editable && order.add_to_bill && (
+            <div className={`revision card ${order.add_to_bill.possible ? '' : 'blocked'}`}>
+              <div className="revision-head">
+                <span className="revision-ico"><Icon name="receipt" size={18} /></span>
+                <div>
+                  <b>{order.add_to_bill.possible ? `Change to bill ${order.add_to_bill.number}` : `Bill ${order.add_to_bill.number} can no longer change`}</b>
+                  <div className="muted small">
+                    {order.add_to_bill.possible
+                      ? 'The shop asked to change a bill from the last business day. Approving revises that same bill.'
+                      : `${order.add_to_bill.reason}. Approving makes a separate bill.`}
+                  </div>
+                </div>
               </div>
+              {order.add_to_bill.possible && (order.add_to_bill.changes?.length ?? 0) > 0 && (
+                <ul className="revision-list">{order.add_to_bill.changes!.map((c, i) => <li key={i}>{c.replace(' -> ', ' → ')}</li>)}</ul>
+              )}
             </div>
-          </div>
-          {order.add_to_bill.possible && (order.add_to_bill.changes?.length ?? 0) > 0 && (
-            <ul className="revision-list">
-              {order.add_to_bill.changes!.map((c, i) => <li key={i}>{c.replace(' -> ', ' → ')}</li>)}
-            </ul>
           )}
-        </div>
-      )}
-      {editable && (
-        <div className="approve-bar">
-          <span>Total <b>{rs(total.toFixed(2))}</b></span>
-          <button className="btn danger" onClick={() => setReject('')}>Reject</button>
-          {can(perms, 'sales_order.approve') && order.add_to_bill?.possible && (
-            <button className="btn" disabled={busy || order.status !== 'draft_ready'} onClick={() => void approve(true)}>Make a separate bill</button>
+
+          <section className="od-msg card">
+            <div className="od-sec-title"><Icon name="message" size={15} /> What the shop sent</div>
+            <div className="od-quote">
+              {order.raw_text.startsWith('[') && order.kind !== 'text' ? null : order.raw_text}
+              {order.has_attachment && <Attachment orderId={order.id} kind={order.kind ?? 'text'} />}
+              {order.transcript && <div className="transcript"><span className="muted small">Heard in the voice note:</span> {order.transcript}</div>}
+            </div>
+            {(order.shop_updates?.length ?? 0) > 0 && (
+              <ul className="od-updates">
+                {order.shop_updates!.map((u, i) => (
+                  <li key={i} className={`upd upd-${u.kind}`}>
+                    <i />
+                    <span><b>{UPDATE_LABEL[u.kind]}</b>{u.message && <> · “{u.message}”</>}{u.changes.length > 0 && <small> {u.changes.join(' ')}</small>}</span>
+                    <time>{u.at ? new Date(u.at).toLocaleTimeString('en-PK', { hour: 'numeric', minute: '2-digit' }) : ''}</time>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          {order.warnings.map((w) => <div key={w.code} className={`alert ${w.code === 'contains_instructions' ? 'error' : 'warn'}`}>{w.message}</div>)}
+
+          {order.status === 'received' || order.status === 'processing' ? (
+            <div className="od-reading card"><span className="spinner" /> Reading the items…</div>
+          ) : lines.length > 0 || editable ? (
+            <section className="od-items card">
+              <div className="od-items-head">
+                <div className="od-sec-title"><Icon name="products" size={15} /> Items the AI read <span className="count-pill">{lines.length}</span></div>
+                {editable && <button className="btn small" onClick={() => setAdding(true)}><Icon name="plus" size={14} /> Add item</button>}
+              </div>
+              <div className="items">
+                {lines.map((l) => {
+                  const blocking = l.issues.filter((i) => i !== 'insufficient_stock')
+                  const low = l.issues.includes('insufficient_stock')
+                  return (
+                    <article key={l.line_no} className={`item ${blocking.length ? 'needs' : 'ok'}`}>
+                      <span className="item-no">{blocking.length ? <Icon name="alert" size={14} /> : <Icon name="check" size={14} />}</span>
+                      <div className="item-main">
+                        <div className="item-name">{l.product_name ?? <span className="muted">Not matched yet</span>}</div>
+                        <div className="item-sub">
+                          Shop wrote <q>{l.phrase}</q>{l.read_as && <> (read as “{l.read_as}”)</>}
+                          {l.product_name && <> · {resolvedBy(l)}</>}
+                        </div>
+                        {blocking.map((i) => <div key={i} className="item-issue">{ISSUE_TEXT[i] ?? i}</div>)}
+                        {editable && (l.issues.includes('ambiguous') || l.issues.includes('not_found')) && (
+                          <div className="cand-row">
+                            {l.candidates.map((c) => (
+                              <button key={c.product_id} className="choice" disabled={busy} onClick={() => void act('/resolve-line', { line_no: l.line_no, product_id: c.product_id, remember })}>
+                                {c.name}
+                              </button>
+                            ))}
+                            <ProductPicker onPick={(p) => void act('/resolve-line', { line_no: l.line_no, product_id: p.id, remember })} />
+                          </div>
+                        )}
+                        {editable && (l.issues.includes('missing_quantity') || l.issues.includes('unit_mismatch')) && (
+                          <span className="qty-fix">
+                            <input className="num-in" placeholder={`qty in ${l.sale_unit ?? 'units'}`} value={qtyEdit[l.line_no] ?? ''} onChange={(e) => setQtyEdit({ ...qtyEdit, [l.line_no]: e.target.value })} />
+                            <button className="btn small primary" disabled={!qtyEdit[l.line_no] || busy} onClick={() => void act('/resolve-line', { line_no: l.line_no, quantity: qtyEdit[l.line_no] })}>Set</button>
+                          </span>
+                        )}
+                      </div>
+                      <div className="item-fig">
+                        <div className="item-qty">{l.quantity ?? '?'} {l.sale_unit ?? l.unit ?? ''}{l.unit_price && <> × {rs(l.unit_price)}</>}</div>
+                        <div className="item-amt">{rs(l.line_total)}</div>
+                        {l.available && <span className={`stock-chip ${low ? 'low' : ''}`}>{low ? 'Low stock' : 'In stock'} · {Number(l.available)}</span>}
+                      </div>
+                      {editable && <button className="icon-btn subtle" title="Remove this item" onClick={() => void act(`/lines/${l.line_no}/remove`)}><Icon name="xCircle" size={16} /></button>}
+                    </article>
+                  )
+                })}
+                {lines.length === 0 && <div className="muted small">No items were read. Add them with “Add item”.</div>}
+              </div>
+              <div className="od-items-foot">
+                {editable ? (
+                  <label className="check"><input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} disabled={!can(perms, 'ai_alias.approve')} /> Remember my product choices for this shop</label>
+                ) : <span />}
+                <span className="od-sum">Total <b>{rs(total.toFixed(2))}</b></span>
+              </div>
+              {editable && !order.customer && <div className="od-link"><CustomerLinker onPick={(c) => void act('/customer', { customer_id: c.id })} /></div>}
+            </section>
+          ) : null}
+
+          {order.questions && order.questions.length > 0 && editable && (
+            <section className="card od-asked">
+              <div className="od-sec-title"><Icon name="send" size={15} /> Asked the shop on WhatsApp</div>
+              {order.questions.map((q, i) => <p key={i}>{q}</p>)}
+            </section>
           )}
-          {can(perms, 'sales_order.approve') ? (
-            <button className="btn primary big" disabled={busy || order.status !== 'draft_ready'} onClick={() => void approve()} title={order.status !== 'draft_ready' ? 'Fix the red lines first' : 'Create the bill'}>
-              {order.add_to_bill?.possible ? `Update bill ${order.add_to_bill.number}` : 'Approve & create bill'}
-            </button>
-          ) : (
-            <span className="muted small">An approver must create the bill.</span>
-          )}
-        </div>
+          {order.invoice && <div className="alert ok">Billed as {order.invoice.number} · {rs(order.invoice.total)}</div>}
+        </>
       )}
-      </>
-      )}
-      <button className="btn ghost small" onClick={() => setShowTrace(!showTrace)}>{showTrace ? 'Hide' : 'Show'} how this was read ({order.extractor})</button>
+      <button className="btn ghost small od-trace" onClick={() => setShowTrace(!showTrace)}>{showTrace ? 'Hide' : 'Show'} how the AI read this ({order.extractor})</button>
       {showTrace && <pre className="trace">{JSON.stringify(order.trace, null, 2)}</pre>}
       {reject !== null && (
         <Modal title="Reject order" onClose={() => setReject(null)}>
           <div className="form">
-            <input autoFocus value={reject} onChange={(e) => setReject(e.target.value)} placeholder="Reason (e.g. duplicate, customer cancelled)" />
+            <input autoFocus value={reject} onChange={(e) => setReject(e.target.value)} placeholder="Reason (sent to the shop, e.g. out of stock)" />
             <div className="modal-actions">
               <button className="btn" onClick={() => setReject(null)}>Cancel</button>
               <button className="btn danger" disabled={reject.length < 3} onClick={() => void act('/reject', { reason: reject }).then(() => setReject(null))}>Reject</button>

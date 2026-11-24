@@ -63,6 +63,12 @@ const NAV: NavItem[] = [
   { key: 'settings', label: 'Settings', perm: 'settings.configure', online: true, group: 'Admin' },
 ]
 
+const NAV_HUE: Record<string, string> = {
+  billing: 'indigo', bills: 'sky', ai: 'emerald', dashboard: 'violet', customers: 'sky', registrations: 'emerald',
+  products: 'teal', purchases: 'amber', suppliers: 'violet', returns: 'rose', cheques: 'teal', expenses: 'amber',
+  reports: 'indigo', staff: 'violet', settings: 'slate',
+}
+
 export function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
   const perms = state.user?.permissions
   const notice = useNotice(state)
@@ -116,30 +122,16 @@ export function Shell({ state, refresh }: { state: AppState; refresh: () => void
   const todo = notice?.new?.total ?? 0
   return (
     <div className="shell">
-      <header className="topbar">
-        <BrandHeader state={state} />
-        <div className="topbar-right">
-          {notice && <Bell counts={notice} onOpen={() => go('ai')} />}
-          <SyncPill state={state} />
-          <div className="user">
-            {user.full_name}
-            {!user.online && <span className="muted small"> (offline sign-in)</span>}
-          </div>
-          <button className="btn ghost" onClick={() => void ordexa().logout().then(refresh)}>
-            Sign out
-          </button>
-        </div>
-      </header>
-      {state.sync.message && state.sync.state !== 'idle' && <div className={`banner ${state.sync.state}`}>{state.sync.message}</div>}
       <div className="body">
         <nav className="sidebar" aria-label="Modules" ref={navRef}>
           <span className="slider" aria-hidden="true" />
           <div className="sidebar-glow" aria-hidden="true" />
+          <div className="side-brand"><BrandHeader state={state} /></div>
           {groups.map((g) => (
             <div key={g} className="nav-group">
               <div className="nav-title">{g}</div>
               {visible.filter((n) => n.group === g).map((n) => (
-                <button key={n.key} className={tab === n.key ? 'active' : ''} onClick={() => go(n.key)}>
+                <button key={n.key} className={`${tab === n.key ? 'active' : ''} hue-${NAV_HUE[n.key] ?? 'indigo'}`} onClick={() => go(n.key)}>
                   <span className="nav-ico"><Icon name={n.key} /></span>
                   <span className="nav-label">{n.label}</span>
                   {n.key === 'ai' && todo > 0 && <span className="nav-badge" title="Orders and messages waiting for you">{todo}</span>}
@@ -148,10 +140,35 @@ export function Shell({ state, refresh }: { state: AppState; refresh: () => void
               ))}
             </div>
           ))}
+          <div className="side-user">
+            <span className="side-avatar">{user.full_name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase()}</span>
+            <div className="side-user-text">
+              <b>{user.full_name}</b>
+              <span>{user.role === 'staff' ? 'Staff' : 'Administrator'}{!user.online && ' · offline'}</span>
+            </div>
+            <button className="side-out" title="Sign out" onClick={() => void ordexa().logout().then(refresh)}>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="M16 17l5-5-5-5" /><path d="M21 12H9" />
+              </svg>
+            </button>
+          </div>
         </nav>
+        <div className="main-col">
+          <header className="topbar">
+            <div className="crumb">
+              <span className="crumb-ico"><Icon name={tab} size={16} /></span>
+              <b>{NAV.find((n) => n.key === tab)?.label ?? ''}</b>
+            </div>
+            <div className="topbar-right">
+              {notice && <Bell counts={notice} onOpen={() => go('ai')} />}
+              <SyncPill state={state} />
+            </div>
+          </header>
+          {state.sync.message && state.sync.state !== 'idle' && <div className={`banner ${state.sync.state}`}>{state.sync.message}</div>}
         <main className="content">
           <div key={tab} className="page-enter">{body}</div>
         </main>
+        </div>
       </div>
       <footer className="statusbar">
         <span>

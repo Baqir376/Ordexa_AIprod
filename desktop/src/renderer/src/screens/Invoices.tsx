@@ -6,7 +6,8 @@ import { useEffect, useState } from 'react'
 import { formatRs } from '../../../core/money'
 import type { AppState, InvoiceView, ReceiptView } from '../../../core/types'
 import { ordexa } from '../bridge'
-import { ErrorBox, Modal, can, rs, useApi } from '../ui'
+import { ErrorBox, Figures, Modal, can, rs, useApi } from '../ui'
+import { Icon } from '../icons'
 import { Receipt } from './Receipt'
 
 const STATUS: Record<InvoiceView['sync_status'], string> = {
@@ -71,21 +72,23 @@ export function Invoices({ state }: { state: AppState }) {
   return (
     <div className="page invoices">
       <div className="page-head">
-        <div>
-          <h1>Bills &amp; receipts</h1>
-          <div className="page-sub">Reprint any bill, check what reached the server, and see every bill of the business.</div>
+        <div className="page-title">
+          <span className="page-ico hue-sky"><Icon name="bills" size={20} /></span>
+          <div>
+            <h1>Bills &amp; receipts</h1>
+            <div className="page-sub">Reprint any bill, check what reached the server, and see every bill of the business.</div>
+          </div>
         </div>
       </div>
 
-      <div className="stats">
-        <div className="stat card"><div className="stat-label">Bills today (this PC)</div><div className="stat-value">{today.length}</div></div>
-        <div className="stat card ok"><div className="stat-label">Sales today (this PC)</div><div className="stat-value">{formatRs(todayTotal)}</div></div>
-        <div className="stat card"><div className="stat-label">Cash received today</div><div className="stat-value">{formatRs(cashToday)}</div></div>
-        <div className={`stat card ${unsynced ? 'warn' : 'ok'}`}>
-          <div className="stat-label">Waiting to sync</div>
-          <div className="stat-value">{unsynced}</div>
-        </div>
-      </div>
+      <Figures
+        items={[
+          { label: 'Bills today (this PC)', value: today.length, icon: 'bills', hue: 'indigo', hint: 'Made on this counter' },
+          { label: 'Sales today (this PC)', value: formatRs(todayTotal), icon: 'reports', hue: 'emerald', hint: 'Total of all bills today' },
+          { label: 'Cash received today', value: formatRs(cashToday), icon: 'expenses', hue: 'sky', hint: 'Counter and shop payments' },
+          { label: 'Waiting to sync', value: unsynced, icon: 'clock', hue: unsynced ? 'amber' : 'teal', hint: unsynced ? 'Will upload when online' : 'Everything is on the server' },
+        ]}
+      />
 
       <div className="toolbar">
         <div className="subtabs">
