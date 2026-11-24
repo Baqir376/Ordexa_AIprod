@@ -27,7 +27,8 @@ def test_conversations_list_and_staff_reply(make_biz):
     r = biz.post("/api/v1/channels/whatsapp/reply", json={"phone": SHOP, "text": "Kal subah delivery ho jayegi."})
     assert r.status_code == 200
     msgs = biz.get(f"/api/v1/channels/whatsapp/messages?phone={SHOP}").json()
-    assert msgs[-1]["direction"] == "out" and msgs[-1]["body"] == "Kal subah delivery ho jayegi." and msgs[-1]["sent_by"] == "staff"
+    assert msgs[-1]["direction"] == "out" and msgs[-1]["sent_by"] == "staff"
+    assert msgs[-1]["body"] == "Kal subah delivery ho jayegi."
     assert any(m["ai_order_id"] for m in msgs if m["direction"] == "in")  # chat lines link to their order
 
 
