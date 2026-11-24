@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 
 import type { AppState } from '../../../core/types'
 import { ordexa } from '../bridge'
+import { Icon } from '../icons'
 import { can } from '../ui'
 import { Staff, Settings } from './Admin'
 import { AiOrders } from './AiOrders'
@@ -133,7 +134,8 @@ export function Shell({ state, refresh }: { state: AppState; refresh: () => void
               <div className="nav-title">{g}</div>
               {visible.filter((n) => n.group === g).map((n) => (
                 <button key={n.key} className={tab === n.key ? 'active' : ''} onClick={() => go(n.key)}>
-                  <span>{n.label}</span>
+                  <Icon name={n.key} />
+                  <span className="nav-label">{n.label}</span>
                   {n.key_hint && <kbd>{n.key_hint}</kbd>}
                 </button>
               ))}

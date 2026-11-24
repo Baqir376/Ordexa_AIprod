@@ -90,48 +90,135 @@ const ISSUE_TEXT: Record<string, string> = {
   inactive_product: 'Product inactive',
 }
 
+type Filter = 'open' | 'approved' | 'rejected' | 'closed'
+const FILTERS: { key: Filter; label: string }[] = [
+  { key: 'open', label: 'Open' },
+  { key: 'approved', label: 'Approved' },
+  { key: 'rejected', label: 'Rejected' },
+  { key: 'closed', label: 'By bot' },
+]
+// Open orders are grouped by what someone has to do next.
+const GROUPS: { title: string; statuses: string[] }[] = [
+  { title: 'Needs your attention', statuses: ['needs_review', 'message', 'failed'] },
+  { title: 'Ready to approve', statuses: ['draft_ready'] },
+  { title: 'Being read by AI', statuses: ['received', 'processing'] },
+]
+
+function initials(name: string): string {
+  const words = name.replace(/[^\p{L}\p{N} ]/gu, ' ').trim().split(/\s+/).filter(Boolean)
+  if (!words.length) return '?'
+  return (words[0][0] + (words[1]?.[0] ?? '')).toUpperCase()
+}
+
+function ago(iso: string): string {
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60_000))
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins} min ago`
+  const h = Math.round(mins / 60)
+  if (h < 24) return `${h} h ago`
+  return new Date(iso).toLocaleDateString('en-PK', { day: 'numeric', month: 'short' })
+}
+
 export function AiOrders({ state }: { state: AppState }) {
   const perms = state.user?.permissions
-  const [filter, setFilter] = useState<'open' | 'approved' | 'rejected' | 'closed'>('open')
+  const [filter, setFilter] = useState<Filter>('open')
+  const [q, setQ] = useState('')
   const list = useApi<Order[]>(`/api/v1/ai/orders?status=${filter}`, [filter])
+  const counts = useApi<Record<string, number>>('/api/v1/ai/orders/counts')
   const [openId, setOpenId] = useState<string | null>(null)
   const [newOrder, setNewOrder] = useState(false)
+  const reload = () => { void list.reload(); void counts.reload() }
 
   useEffect(() => {
-    const t = setInterval(() => void list.reload(), 10_000) // new WhatsApp orders appear without refreshing
+    const t = setInterval(() => { void list.reload(); void counts.reload() }, 10_000) // new WhatsApp orders appear without refreshing
     return () => clearInterval(t)
-  }, [list.reload])
+  }, [list.reload, counts.reload])
+
+  const needle = q.trim().toLowerCase()
+  const rows = (list.data ?? []).filter((o) =>
+    !needle || [o.number, o.customer?.name, o.customer?.code, o.sender, o.raw_text].some((v) => v?.toLowerCase().includes(needle)))
+  const groups = filter === 'open'
+    ? GROUPS.map((g) => ({ ...g, rows: rows.filter((o) => g.statuses.includes(o.status)) })).filter((g) => g.rows.length)
+    : [{ title: '', statuses: [], rows }]
+
+  const card = (o: Order) => {
+    const who = o.customer?.name ?? o.sender ?? 'Unknown sender'
+    const badge = shopBadge(o)
+    return (
+      <button key={o.id} className={`order-card st-${o.status} ${openId === o.id ? 'active' : ''}`} onClick={() => setOpenId(o.id)}>
+        <span className="avatar">{initials(who)}</span>
+        <div className="oc-top">
+          <b title={who}>{who}</b>
+          <span className={`tag st-${o.status}`}>{STATUS_LABEL[o.status] ?? o.status}</span>
+        </div>
+        <div className="oc-text">
+          {o.kind === 'image' ? '📷 Photo ' : o.kind === 'audio' ? '🎤 Voice note ' : ''}
+          {o.raw_text.startsWith('[') ? '' : o.raw_text}
+        </div>
+        <div className="oc-meta">
+          <span>{o.number}</span>
+          <span className="dot-sep">{ago(o.received_at)}</span>
+          {o.line_count > 0 && <span className="dot-sep">{o.line_count} item{o.line_count === 1 ? '' : 's'}</span>}
+          {o.invoice && <span className="dot-sep">{o.invoice.number}</span>}
+          {badge && <span className="shop-badge">{badge}</span>}
+        </div>
+      </button>
+    )
+  }
 
   return (
     <div className="desk">
       <div className="desk-list">
-        <div className="page-head">
-          <h1>WhatsApp orders</h1>
-          {can(perms, 'sales_order.create') && <button className="btn primary small" onClick={() => setNewOrder(true)}>+ Paste order</button>}
-        </div>
-        <div className="subtabs">
-          {(['open', 'approved', 'rejected', 'closed'] as const).map((f) => (
-            <button key={f} className={filter === f ? 'active' : ''} onClick={() => setFilter(f)}>{f === 'closed' ? 'answered by bot' : f}</button>
-          ))}
+        <div className="desk-list-head">
+          <div className="page-head">
+            <div>
+              <h1>WhatsApp orders</h1>
+              <div className="page-sub">Read by AI, approved by you.</div>
+            </div>
+            {can(perms, 'sales_order.create') && <button className="btn primary small" onClick={() => setNewOrder(true)}>+ Paste order</button>}
+          </div>
+          <div className="subtabs" role="tablist">
+            {FILTERS.map((f) => {
+              const n = counts.data?.[f.key]
+              const hot = f.key === 'open' && (counts.data?.needs_review ?? 0) > 0
+              return (
+                <button key={f.key} role="tab" aria-selected={filter === f.key} className={filter === f.key ? 'active' : ''} onClick={() => setFilter(f.key)}>
+                  {f.label}
+                  {n !== undefined && <span className={`count ${hot && filter !== f.key ? 'hot' : ''}`}>{n}</span>}
+                </button>
+              )
+            })}
+          </div>
+          <input placeholder="Search shop, order no. or text" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
         <ErrorBox error={list.error} />
-        {list.data?.length === 0 && <div className="muted pad">No {filter} orders.</div>}
-        {list.data?.map((o) => (
-          <button key={o.id} className={`order-card ${openId === o.id ? 'active' : ''}`} onClick={() => setOpenId(o.id)}>
-            <div className="oc-top">
-              <b>{o.customer?.name ?? o.sender ?? 'Unknown sender'}</b>
-              <span className={`tag st-${o.status}`}>{STATUS_LABEL[o.status] ?? o.status}</span>
+        <div className="desk-items">
+          {list.data && rows.length === 0 && (
+            <div className="empty-state">
+              <div className="big-icon">✓</div>
+              <div>{needle ? 'Nothing matches your search.' : filter === 'open' ? 'All caught up. New WhatsApp orders appear here.' : `No ${FILTERS.find((f) => f.key === filter)?.label.toLowerCase()} orders.`}</div>
             </div>
-            {shopBadge(o) && <div className="shop-badge">{shopBadge(o)}</div>}
-            <div className="oc-text">{o.kind === 'image' ? '[Photo] ' : o.kind === 'audio' ? '[Voice note] ' : ''}{o.raw_text.startsWith('[') ? '' : o.raw_text}</div>
-            <div className="muted small">{o.number} · {o.source === 'whatsapp' ? 'WhatsApp' : 'Typed'} · {new Date(o.received_at).toLocaleTimeString('en-PK')}</div>
-          </button>
-        ))}
+          )}
+          {groups.map((g) => (
+            <div key={g.title || 'all'} style={{ display: 'contents' }}>
+              {g.title && <div className="desk-group-title">{g.title} · {g.rows.length}</div>}
+              {g.rows.map(card)}
+            </div>
+          ))}
+        </div>
       </div>
       <div className="desk-detail">
-        {openId ? <OrderDetail key={openId} id={openId} state={state} onChanged={() => void list.reload()} /> : <div className="empty">Select an order on the left.</div>}
+        {openId ? (
+          <OrderDetail key={openId} id={openId} state={state} onChanged={reload} />
+        ) : (
+          <div className="empty-state" style={{ height: '100%' }}>
+            <div className="big-icon">💬</div>
+            <div><b>Select an order</b></div>
+            <div className="small">Pick an order on the left to check its items and approve the bill.</div>
+          </div>
+        )}
       </div>
-      {newOrder && <NewOrderModal onClose={() => setNewOrder(false)} onCreated={(id) => { setNewOrder(false); setOpenId(id); void list.reload() }} />}
+      {newOrder && <NewOrderModal onClose={() => setNewOrder(false)} onCreated={(id) => { setNewOrder(false); setOpenId(id); reload() }} />}
     </div>
   )
 }
@@ -195,12 +282,20 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
 
   return (
     <div className="page">
-      <div className="page-head">
-        <h1>{order.number} · {order.customer ? `${order.customer.code} ${order.customer.name}` : 'Customer not linked'}</h1>
+      <div className="card order-head">
+        <div>
+          <h1>{order.customer ? order.customer.name : 'Customer not linked'}</h1>
+          <div className="meta">
+            <span>{order.number}</span>
+            {order.customer && <span>Shop code {order.customer.code}</span>}
+            <span>{order.source === 'whatsapp' ? `WhatsApp ${order.sender ?? ''}` : 'Typed by staff'}</span>
+            <span>{new Date(order.received_at).toLocaleString('en-PK')}</span>
+          </div>
+        </div>
         <span className={`tag st-${order.status}`}>{STATUS_LABEL[order.status]}</span>
       </div>
       <div className="message-bubble">
-        <div className="muted small">{order.source === 'whatsapp' ? `WhatsApp ${order.sender ?? ''}` : 'Typed by staff'} · {new Date(order.received_at).toLocaleString('en-PK')}</div>
+        <div className="muted small">Shop wrote</div>
         {order.raw_text.startsWith('[') && order.kind !== 'text' ? null : order.raw_text}
         {order.has_attachment && <Attachment orderId={order.id} kind={order.kind ?? 'text'} />}
         {order.transcript && <div className="transcript"><span className="muted small">Heard in the voice note:</span> {order.transcript}</div>}

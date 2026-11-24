@@ -168,7 +168,7 @@ export function ReceiveModal({ customer, onClose, onDone }: { customer: { id: st
         <div className="form">
           <div className="seg">
             {(['cash', 'cheque', 'bank'] as const).map((m) => (
-              <button key={m} className={method === m ? 'active' : ''} onClick={() => setMethod(m)}>{m}</button>
+              <button key={m} className={method === m ? 'active' : ''} onClick={() => setMethod(m)}>{{ cash: 'Cash', cheque: 'Cheque', bank: 'Bank transfer' }[m]}</button>
             ))}
           </div>
           <Field label="Amount (Rs)"><input value={f.amount} onChange={set('amount')} autoFocus /></Field>

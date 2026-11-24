@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ordexa.modules.ai import service
@@ -131,13 +131,35 @@ def out(session: Session, r: AiOrderRequest, full: bool = True) -> dict:
     return d
 
 
+OPEN_STATUSES = ("received", "processing", "needs_review", "draft_ready", "failed", "message")
+
+
+@router.get("/orders/counts")
+def order_counts(p: Principal = Depends(requires("sales_order.view")), session: Session = Depends(get_session)):
+    """How many orders are in each desk tab (open = everything still waiting for someone)."""
+    rows = dict(
+        session.execute(
+            select(AiOrderRequest.status, func.count())
+            .where(AiOrderRequest.tenant_id == p.tenant_id)
+            .group_by(AiOrderRequest.status)
+        ).all()
+    )
+    return {
+        "open": sum(rows.get(s, 0) for s in OPEN_STATUSES),
+        "needs_review": rows.get("needs_review", 0) + rows.get("message", 0),
+        "approved": rows.get("approved", 0),
+        "rejected": rows.get("rejected", 0),
+        "closed": rows.get("closed", 0),
+    }
+
+
 @router.get("/orders")
 def list_orders(
     status: str | None = None, p: Principal = Depends(requires("sales_order.view")), session: Session = Depends(get_session)
 ):
     q = select(AiOrderRequest).where(AiOrderRequest.tenant_id == p.tenant_id)
     if status == "open":
-        q = q.where(AiOrderRequest.status.in_(("received", "processing", "needs_review", "draft_ready", "failed", "message")))
+        q = q.where(AiOrderRequest.status.in_(OPEN_STATUSES))
     elif status:
         q = q.where(AiOrderRequest.status == status)
     q = q.order_by(AiOrderRequest.received_at.desc()).limit(200)

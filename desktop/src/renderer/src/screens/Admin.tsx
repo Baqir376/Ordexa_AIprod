@@ -129,9 +129,12 @@ export function Settings({ state }: { state: AppState }) {
   return (
     <Page title="Settings">
       <ErrorBox error={tenant.error ?? error} />
+      <div className="settings-grid">
       {brand && (
         <div className="card pad form">
-          <h2>Business branding</h2>
+          <div>
+            <h2>Business branding</h2>
+          </div>
           <p className="muted small">Shown on every PC, the sign-in screen and printed bills. Plan: <b>{brand.license_plan}</b> · business code <b>{tenant.data?.code}</b></p>
           <div className="row-2">
             <Field label="Business name on screen and bills"><input value={brand.display_name} onChange={(e) => setB({ ...brand, display_name: e.target.value })} /></Field>
@@ -149,11 +152,12 @@ export function Settings({ state }: { state: AppState }) {
           <div className="modal-actions"><button className="btn primary" disabled={busy || !b} onClick={() => void saveBranding()}>Save branding</button></div>
         </div>
       )}
-      <WhatsAppConnectionCard />
       <PrinterCard />
+      <div className="span-2"><WhatsAppConnectionCard /></div>
       <BackupCard />
       <div className="card pad">
         <h2>Billing PCs</h2>
+        <p className="section-desc">Every PC that bills for this business, with its own bill series.</p>
         <Table
           rows={devices.data}
           columns={[
@@ -166,12 +170,13 @@ export function Settings({ state }: { state: AppState }) {
       </div>
       <div className="card pad form">
         <h2>Warehouses / stores</h2>
-        <ul>{tenant.data?.warehouses.map((w) => <li key={w.id}><b>{w.code}</b> {w.name}</li>)}</ul>
+        <div className="chips">{tenant.data?.warehouses.map((w) => <span key={w.id} className="chip"><b>{w.code}</b> {w.name}</span>)}</div>
         <div className="inline-form">
           <Field label="Code"><input value={wh.code} onChange={(e) => setWh({ ...wh, code: e.target.value })} /></Field>
           <Field label="Name"><input value={wh.name} onChange={(e) => setWh({ ...wh, name: e.target.value })} /></Field>
           <button className="btn" disabled={busy || !wh.code || !wh.name} onClick={() => void run(() => ordexa().request('POST', '/api/v1/inventory/warehouses', wh)).then((r) => { if (r) { setWh({ code: '', name: '' }); void tenant.reload() } })}>Add warehouse</button>
         </div>
+      </div>
       </div>
     </Page>
   )

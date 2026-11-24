@@ -273,3 +273,11 @@ def test_complaint_written_next_to_an_order_reaches_staff(make_biz, monkeypatch)
     assert "Calpol Syrup 120ml: 6 bottle" in r and "team tak pohancha di" in r
     o = biz.get(f"/api/v1/ai/orders/{orders(biz)[0]['id']}").json()
     assert any(w["code"] == "shop_question" and "tooti" in w["message"] for w in o["warnings"])
+
+
+def test_order_desk_tab_counts(make_biz):
+    biz = verified(make_biz())
+    say(biz, "mera hisaab batao")  # answered by the bot
+    say(biz, "5 botal calpol")  # waiting for staff
+    c = biz.get("/api/v1/ai/orders/counts").json()
+    assert c["open"] == 1 and c["closed"] == 1 and c["approved"] == 0

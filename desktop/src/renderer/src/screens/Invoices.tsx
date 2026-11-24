@@ -25,10 +25,16 @@ export function Invoices({ state }: { state: AppState }) {
   if (open) return <Receipt invoice={open} state={state} onNext={() => setOpen(null)} nextLabel="Back to bills" />
 
   return (
-    <div className="invoices">
+    <div className="page invoices">
+      <div className="page-head">
+        <div>
+          <h1>Bills &amp; receipts</h1>
+          <div className="page-sub">Bills made on this PC (also while offline) and cash received at the counter.</div>
+        </div>
+      </div>
       <div className="subtabs">
-        <button className={view === 'bills' ? 'active' : ''} onClick={() => setView('bills')}>Bills on this PC ({rows.length})</button>
-        <button className={view === 'receipts' ? 'active' : ''} onClick={() => setView('receipts')}>Cash receipts ({receipts.length})</button>
+        <button className={view === 'bills' ? 'active' : ''} onClick={() => setView('bills')}>Bills on this PC <span className="count">{rows.length}</span></button>
+        <button className={view === 'receipts' ? 'active' : ''} onClick={() => setView('receipts')}>Cash receipts <span className="count">{receipts.length}</span></button>
       </div>
       {view === 'bills' ? (
         <table className="lines">
