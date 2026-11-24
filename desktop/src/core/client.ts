@@ -167,7 +167,7 @@ export class OrdexaClient {
    * Online-only call for admin and back-office screens (master data, purchases, reports...). The server
    * enforces permissions; this only adds the session token and refuses non-API paths.
    */
-  async request<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<T> {
+  async request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
     if (!this.user) throw new Error('Please sign in.')
     if (!/^\/api\/v1\/[\w\-/?=&.%:]*$/.test(path)) throw new Error('invalid path')
     if (!this.token) throw new Error('This screen needs the server. Connect to the internet and sign in again.')

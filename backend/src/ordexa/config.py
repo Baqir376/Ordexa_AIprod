@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     whatsapp_token: str = ""
     whatsapp_phone_number_id: str = ""
     whatsapp_tenant_code: str = ""  # which business this WhatsApp number belongs to
-    whatsapp_api_base: str = "https://graph.facebook.com/v21.0"
+    whatsapp_api_base: str = "https://graph.facebook.com/v26.0"  # v21.0 is removed by Meta on 2027-01-21
     # Login protection: failed attempts per business+username within the window before a temporary lock.
     login_max_failures: int = 10
     login_window_minutes: int = 15

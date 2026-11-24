@@ -18,6 +18,13 @@ class WhatsappNumber(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
     phone_number_id: Mapped[str] = mapped_column(String(40), unique=True)
     display_phone: Mapped[str] = mapped_column(String(30))
+    # Connection details entered in Settings -> WhatsApp (secrets encrypted with shared.crypto, never returned)
+    access_token_enc: Mapped[str | None] = mapped_column(Text)
+    app_secret_enc: Mapped[str | None] = mapped_column(Text)
+    verify_token: Mapped[str | None] = mapped_column(String(80))
+    public_url: Mapped[str | None] = mapped_column(String(300))  # where Meta reaches this server (tunnel or host)
+    last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

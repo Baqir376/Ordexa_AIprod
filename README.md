@@ -10,6 +10,7 @@ A white-label ERP for Pakistani medicine distributors and chemists:
 | Requirements | `../Ordexa_ERP_SRS_and_System_Architecture_v1.1.md` |
 | Decisions | [`docs/adr/`](docs/adr): platform and processes, data location, offline sync, pharma pilot, AI order desk, WhatsApp sign-up |
 | AI guardrails | [`docs/adr/0007-ai-guardrails.md`](docs/adr/0007-ai-guardrails.md): injection and hallucination guards, red-team results |
+| Test WhatsApp | [`docs/WHATSAPP_TESTING.md`](docs/WHATSAPP_TESTING.md): connect Meta's free test number in Settings and test from your phone |
 | Deploy (free) | [`docs/DEPLOY.md`](docs/DEPLOY.md): Neon Postgres + Render, one container, `render.yaml` blueprint |
 | AI reference design | `../orderwise` (OrderWise) |
 
@@ -62,7 +63,7 @@ Notes:
 
 ## Tests
 ```bash
-cd backend && .venv/Scripts/pytest            # 108 tests on real PostgreSQL
+cd backend && .venv/Scripts/pytest            # 114 tests on real PostgreSQL
 cd desktop && npm test                        # offline billing engine
 ORDEXA_E2E_URL=http://127.0.0.1:8000 ORDEXA_E2E_TENANT=<code> ORDEXA_E2E_PASSWORD=<pw> npm run test:e2e
 npm run build && node tests/smoke/full-tour.mjs <code> <pw> <screenshot-dir>   # drives the real app
@@ -70,7 +71,7 @@ npm run build && node tests/smoke/full-tour.mjs <code> <pw> <screenshot-dir>   #
 
 | Suite | What it covers |
 |---|---|
-| Backend (108 tests) | Permissions, tenant isolation, sync idempotency, purchases, ledger/cheques/returns, reports, AI resolution/memory/approval, WhatsApp sign-up and lockout, webhook → worker. |
+| Backend (114 tests) | Permissions, tenant isolation, sync idempotency, purchases, ledger/cheques/returns, reports, AI resolution/memory/approval, WhatsApp sign-up and lockout, webhook → worker. |
 | Two-PC end-to-end test | Two PCs bill and take receipts offline, reconnect, replay; no duplicates and exact stock. |
 | UI tour | Bills a shop, signs a shop up over WhatsApp, orders in Roman Urdu, fixes and approves the AI draft into a bill, then opens every back-office screen. |
 

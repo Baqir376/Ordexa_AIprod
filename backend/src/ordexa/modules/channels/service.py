@@ -16,6 +16,7 @@ import secrets
 import urllib.error
 import urllib.request
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
@@ -32,6 +33,7 @@ from ordexa.modules.identity.service import Principal
 from ordexa.modules.jobs.models import Job
 from ordexa.modules.jobs.service import enqueue
 from ordexa.modules.tenants.models import Tenant
+from ordexa.shared.crypto import decrypt
 from ordexa.shared.db import lock_master_data
 from ordexa.shared.errors import ErrorCode, OrdexaError
 
@@ -82,10 +84,33 @@ def queue_text(session: Session, tenant_id: uuid.UUID, to: str, body: str, key: 
     )
 
 
+@dataclass
+class Creds:
+    """How to reach the Cloud API for one business: from Settings -> WhatsApp, else the environment."""
+
+    phone_number_id: str
+    token: str
+    app_secret: str | None
+    number: WhatsappNumber | None = None
+
+
+def credentials(session: Session, tenant_id: uuid.UUID) -> Creds | None:
+    n = session.scalar(
+        select(WhatsappNumber).where(WhatsappNumber.tenant_id == tenant_id).order_by(WhatsappNumber.created_at.desc())
+    )
+    if n is not None:
+        token = decrypt(n.access_token_enc)
+        if token:
+            return Creds(n.phone_number_id, token, decrypt(n.app_secret_enc), n)
+    st = get_settings()
+    if st.whatsapp_token and st.whatsapp_phone_number_id:
+        return Creds(st.whatsapp_phone_number_id, st.whatsapp_token, st.whatsapp_app_secret or None, n)
+    return None
+
+
 def send_job(session: Session, job: Job) -> None:
-    """Outbox worker handler. Real Cloud API when a token is configured; otherwise recorded as 'simulated'."""
+    """Outbox worker handler. Real Cloud API when the business has connected WhatsApp; otherwise 'simulated'."""
     p = job.payload
-    s = get_settings()
     contact = session.scalar(
         select(WhatsappContact).where(WhatsappContact.tenant_id == job.tenant_id, WhatsappContact.phone == p["to"])
     )
@@ -97,18 +122,51 @@ def send_job(session: Session, job: Job) -> None:
         body=p["body"],
         status="simulated",
     )
-    if s.whatsapp_token and s.whatsapp_phone_number_id:
+    creds = credentials(session, job.tenant_id)
+    if creds is not None:
         in_window = contact and contact.last_message_at and utcnow() - contact.last_message_at < REPLY_WINDOW
         if not in_window and not p.get("template"):
             msg.status, msg.error = "failed", "outside the 24-hour reply window; an approved template is required"
         else:
-            msg.wamid = _cloud_send(p["to"], p["body"], p.get("template"))
-            msg.status = "sent"
+            try:
+                msg.wamid = _cloud_send(creds, p["to"], p["body"], p.get("template"))
+                msg.status = "sent"
+            except PermanentSendError as exc:  # e.g. bad token, number not allowed: record it, don't retry forever
+                msg.status, msg.error = "failed", str(exc)[:500]
+                if creds.number is not None:
+                    creds.number.last_error = str(exc)[:500]
     session.add(msg)
 
 
-def _cloud_send(to: str, body: str, template: str | None) -> str:
+class PermanentSendError(RuntimeError):
+    pass
+
+
+def graph_request(creds: Creds, method: str, path: str, payload: dict | None = None, timeout: int = 20) -> dict:
     s = get_settings()
+    req = urllib.request.Request(
+        f"{s.whatsapp_api_base}/{path.lstrip('/')}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        method=method,
+        headers={"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 - fixed https Graph API base
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:400]
+        try:
+            detail = json.loads(detail)["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            pass
+        if e.code == 429 or e.code >= 500:
+            raise RuntimeError(f"WhatsApp API {e.code}: {detail}") from e  # retried with backoff
+        raise PermanentSendError(f"WhatsApp API {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"WhatsApp API unreachable: {e.reason}") from e
+
+
+def _cloud_send(creds: Creds, to: str, body: str, template: str | None) -> str:
     if template:  # business-initiated (e.g. one-time code): approved template with one body parameter
         payload = {
             "messaging_product": "whatsapp",
@@ -122,20 +180,7 @@ def _cloud_send(to: str, body: str, template: str | None) -> str:
         }
     else:
         payload = {"messaging_product": "whatsapp", "to": to.lstrip("+"), "type": "text", "text": {"body": body[:4096]}}
-    req = urllib.request.Request(
-        f"{s.whatsapp_api_base}/{s.whatsapp_phone_number_id}/messages",
-        data=json.dumps(payload).encode(),
-        method="POST",
-        headers={"Authorization": f"Bearer {s.whatsapp_token}", "Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - fixed https Graph API base
-            return json.loads(r.read())["messages"][0]["id"]
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode(errors="replace")[:300]
-        if e.code in (429,) or e.code >= 500:
-            raise RuntimeError(f"WhatsApp API {e.code}: {detail}") from e  # retried with backoff
-        raise RuntimeError(f"WhatsApp API rejected the message ({e.code}): {detail}") from e
+    return graph_request(creds, "POST", f"{creds.phone_number_id}/messages", payload)["messages"][0]["id"]
 
 
 # ------------------------------------------------------------------ inbound
@@ -154,6 +199,11 @@ def inbound_job(session: Session, job: Job) -> None:
     """Channels worker handler for webhook events."""
     msg = job.payload.get("message") or {}
     tenant = tenant_for_number(session, job.payload.get("phone_number_id"))
+    number = session.scalar(
+        select(WhatsappNumber).where(WhatsappNumber.phone_number_id == (job.payload.get("phone_number_id") or ""))
+    )
+    if number is not None:
+        number.last_inbound_at = utcnow()
     if tenant is None:
         log.warning("message for unknown business number %s dropped", job.payload.get("phone_number_id"))
         return
@@ -180,14 +230,12 @@ def inbound_job(session: Session, job: Job) -> None:
 MAX_MEDIA_BYTES = 10 * 1024 * 1024
 
 
-def download_media(media_id: str) -> tuple[bytes, str]:
-    """Fetch a WhatsApp media file (photo / voice note) with the Cloud API token."""
-    s = get_settings()
-    auth = {"Authorization": f"Bearer {s.whatsapp_token}"}
-    with urllib.request.urlopen(urllib.request.Request(f"{s.whatsapp_api_base}/{media_id}", headers=auth), timeout=20) as r:  # noqa: S310
-        meta = json.loads(r.read())
+def download_media(creds: Creds, media_id: str) -> tuple[bytes, str]:
+    """Fetch a WhatsApp media file (photo / voice note) with the business's Cloud API token."""
+    meta = graph_request(creds, "GET", media_id)
     if int(meta.get("file_size") or 0) > MAX_MEDIA_BYTES:
         raise ValueError("media file is larger than 10 MB")
+    auth = {"Authorization": f"Bearer {creds.token}"}
     with urllib.request.urlopen(urllib.request.Request(meta["url"], headers=auth), timeout=60) as r:  # noqa: S310
         data = r.read(MAX_MEDIA_BYTES + 1)
     if len(data) > MAX_MEDIA_BYTES:
@@ -512,9 +560,10 @@ def _media_order(
     Photos are read by Claude; voice notes wait for staff to listen (or a speech-to-text provider, when added)."""
     data, mime = media.get("data"), media.get("mime")
     error = None
-    if data is None and media.get("media_id") and get_settings().whatsapp_token:
+    creds = credentials(session, tenant.id) if data is None and media.get("media_id") else None
+    if creds is not None:
         try:
-            data, mime = download_media(media["media_id"])
+            data, mime = download_media(creds, media["media_id"])
         except Exception as exc:  # noqa: BLE001 - the order still reaches staff, with the error
             error = f"could not download the {media['kind']}: {exc}"[:300]
             log.warning("media download failed for %s: %s", wamid, exc)

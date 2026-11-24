@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import type { AppState } from '../../../core/types'
 import { ordexa } from '../bridge'
 import { ErrorBox, Field, Modal, Page, Table, useAction, useApi } from '../ui'
+import { WhatsAppConnectionCard } from './WhatsAppConnection'
 
 interface User { id: string; username: string; full_name: string; role: string; is_active: boolean }
 interface Catalog { modules: Record<string, string[]>; presets: Record<string, string[]> }
@@ -148,6 +149,7 @@ export function Settings({ state }: { state: AppState }) {
           <div className="modal-actions"><button className="btn primary" disabled={busy || !b} onClick={() => void saveBranding()}>Save branding</button></div>
         </div>
       )}
+      <WhatsAppConnectionCard />
       <PrinterCard />
       <BackupCard />
       <div className="card pad">
