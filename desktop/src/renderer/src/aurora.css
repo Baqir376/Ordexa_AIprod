@@ -490,3 +490,7 @@ h1 { color: var(--ink); letter-spacing: -0.02em; }
 input[type='file'] { padding: 6px; }
 input[type='color'] { padding: 3px; height: 38px; }
 .steps-help, ol.setup { background: var(--accent-soft); border-radius: 12px; }
+
+/* user card pinned to the very bottom of the sidebar (stays there on tall windows and while the menu scrolls) */
+.side-user { margin-top: auto; position: sticky; bottom: 0; z-index: 2; background: rgba(36, 32, 90, 0.92); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+.sidebar > .nav-group:last-of-type { margin-bottom: 12px; }
