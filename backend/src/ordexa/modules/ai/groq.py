@@ -154,3 +154,19 @@ def transcribe(data: bytes, media_type: str) -> str:
     parts.append(f"--{boundary}--\r\n".encode())
     res = _post("/audio/transcriptions", b"".join(parts), f"multipart/form-data; boundary={boundary}", timeout=120)
     return (res.get("text") or "").strip()
+
+
+def chat_json(system: str, user: str, schema: dict, name: str) -> dict:
+    """One strict-JSON-schema chat call on the text model (used for follow-up messages about an open order)."""
+    body = {
+        "model": get_settings().groq_model,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": name, "strict": True, "schema": schema}},
+        "temperature": 0,
+        "max_completion_tokens": 2000,
+    }
+    res = _post("/chat/completions", json.dumps(body).encode(), "application/json")
+    choice = res["choices"][0]
+    if choice.get("finish_reason") == "length":
+        raise RuntimeError("model output was cut off")
+    return json.loads(choice["message"]["content"] or "")

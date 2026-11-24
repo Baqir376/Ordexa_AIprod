@@ -561,7 +561,7 @@ def apply_customer_answer(session: Session, req: AiOrderRequest, text: str) -> s
         return f"Maazrat, samajh nahi aaya. {q}" if q else "Maazrat, samajh nahi aaya."
     keep = {x["line_no"]: x for x in lines if x.get("resolution") in ("operator", "customer")}
     req.extraction = ex.model_dump()
-    req.trace = (req.trace or []) + [{"step": "customer_answer", "answer": text[:60], "at": utcnow().isoformat()}]
+    req.trace = (req.trace or []) + [{"step": "customer_answer", "answer": text[:300], "at": utcnow().isoformat()}]
     evaluate(session, req, ex, keep=keep)
     record(
         session,

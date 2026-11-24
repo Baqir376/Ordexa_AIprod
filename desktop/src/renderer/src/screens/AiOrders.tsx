@@ -22,6 +22,13 @@ interface Line {
   unit_price: string | null
   line_total: string | null
   available: string | null
+  read_as?: string | null
+}
+interface ShopUpdate {
+  kind: 'answered' | 'changed' | 'cancelled' | 'message' | 'thanks'
+  at: string | null
+  message: string | null
+  changes: string[]
 }
 interface Order {
   id: string
@@ -39,6 +46,7 @@ interface Order {
   warnings: { code: string; message: string }[]
   invoice: { id: string; number: string; total: string } | null
   review_note: string | null
+  shop_updates?: ShopUpdate[]
   lines?: Line[]
   questions?: string[]
   trace?: Record<string, unknown>[]
@@ -54,6 +62,22 @@ const STATUS_LABEL: Record<string, string> = {
   rejected: 'Rejected',
   failed: 'Failed',
 }
+const UPDATE_LABEL: Record<ShopUpdate['kind'], string> = {
+  answered: 'Answered the question',
+  changed: 'Changed the order',
+  cancelled: 'Cancelled the order',
+  message: 'Message for you',
+  thanks: 'Said thanks',
+}
+
+function shopBadge(o: Order): string | null {
+  if (o.status === 'rejected' && o.review_note?.startsWith('Cancelled by the shop')) return 'Cancelled by shop'
+  const u = (o.shop_updates ?? []).filter((x) => x.kind !== 'thanks')
+  if (!u.length) return null
+  const last = u[u.length - 1]
+  return last.kind === 'message' ? 'Shop asked a question' : last.kind === 'changed' ? 'Changed by shop' : 'Shop replied'
+}
+
 const ISSUE_TEXT: Record<string, string> = {
   ambiguous: 'Which product? Pick one below',
   not_found: 'Not in catalogue: choose a product',
@@ -95,6 +119,7 @@ export function AiOrders({ state }: { state: AppState }) {
               <b>{o.customer?.name ?? o.sender ?? 'Unknown sender'}</b>
               <span className={`tag st-${o.status}`}>{STATUS_LABEL[o.status] ?? o.status}</span>
             </div>
+            {shopBadge(o) && <div className="shop-badge">{shopBadge(o)}</div>}
             <div className="oc-text">{o.kind === 'image' ? '[Photo] ' : o.kind === 'audio' ? '[Voice note] ' : ''}{o.raw_text.startsWith('[') ? '' : o.raw_text}</div>
             <div className="muted small">{o.number} · {o.source === 'whatsapp' ? 'WhatsApp' : 'Typed'} · {new Date(o.received_at).toLocaleTimeString('en-PK')}</div>
           </button>
@@ -118,13 +143,34 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
   const [showTrace, setShowTrace] = useState(false)
   const { busy, error, setError, run } = useAction()
 
-  const load = async () => setOrder(await ordexa().request<Order>('GET', `/api/v1/ai/orders/${id}`))
+  const [flash, setFlash] = useState(false)
+  const load = async () => {
+    const next = await ordexa().request<Order>('GET', `/api/v1/ai/orders/${id}`)
+    setOrder((prev) => {
+      if (prev && (next.shop_updates?.length ?? 0) > (prev.shop_updates?.length ?? 0)) {
+        setFlash(true)
+        onChanged()
+      }
+      return next
+    })
+  }
+  const typing = Object.values(qtyEdit).some(Boolean) || adding || reject !== null || busy
   useEffect(() => {
     void load()
-    const t = setInterval(() => { if (order?.status === 'received' || order?.status === 'processing') void load() }, 3000)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id])
+  useEffect(() => {
+    const fast = order?.status === 'received' || order?.status === 'processing'
+    // Keep the open order live: the AI may still be reading it, or the shop may change it in the chat.
+    const t = setInterval(() => { if (!typing) void load() }, fast ? 3000 : 5000)
     return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, order?.status])
+  }, [id, order?.status, typing])
+  useEffect(() => {
+    if (!flash) return
+    const t = setTimeout(() => setFlash(false), 8000)
+    return () => clearTimeout(t)
+  }, [flash])
 
   async function act(path: string, body: unknown = {}) {
     const r = await run(() => ordexa().request<Order>('POST', `/api/v1/ai/orders/${id}${path}`, body))
@@ -156,6 +202,22 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
         {order.has_attachment && <Attachment orderId={order.id} kind={order.kind ?? 'text'} />}
         {order.transcript && <div className="transcript"><span className="muted small">Heard in the voice note:</span> {order.transcript}</div>}
       </div>
+      {flash && <div className="alert ok">The shop just updated this order on WhatsApp. See below.</div>}
+      {(order.shop_updates?.length ?? 0) > 0 && (
+        <div className="card pad shop-updates">
+          <div className="muted small">Updates from the shop on WhatsApp</div>
+          <ul>
+            {order.shop_updates!.map((u, i) => (
+              <li key={i} className={`upd upd-${u.kind}`}>
+                <span className="muted small">{u.at ? new Date(u.at).toLocaleTimeString('en-PK') : ''}</span>{' '}
+                <b>{UPDATE_LABEL[u.kind]}</b>
+                {u.message && <span>: “{u.message}”</span>}
+                {u.changes.length > 0 && <div className="small">{u.changes.join(' ')}</div>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {order.warnings.map((w) => <div key={w.code} className={`alert ${w.code === 'contains_instructions' ? 'error' : 'warn'}`}>{w.message}</div>)}
       {order.status === 'received' || order.status === 'processing' ? (
         <div className="muted">The AI worker is reading this order…</div>
@@ -170,13 +232,14 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
                   <td>{l.line_no}</td>
                   <td>
                     <b>{l.phrase}</b>
+                    {l.read_as && <div className="muted small">read as “{l.read_as}”</div>}
                     <div className="muted small">{l.quantity ?? '?'} {l.unit ?? ''}</div>
                   </td>
                   <td>
                     {l.product_name ? (
                       <>
                         {l.product_name}
-                        <div className="muted small">{l.resolution === 'alias' ? `remembered for this shop (v${l.alias_version})` : l.resolution === 'operator' ? 'chosen by staff' : 'matched catalogue'}</div>
+                        <div className="muted small">{l.resolution === 'alias' ? `remembered for this shop (v${l.alias_version})` : l.resolution === 'operator' ? 'chosen by staff' : l.resolution === 'customer' ? 'confirmed by the shop' : 'matched catalogue'}</div>
                       </>
                     ) : null}
                     {l.issues.map((i) => <div key={i} className={i === 'insufficient_stock' ? 'warn-text small' : 'bad-text small'}>{ISSUE_TEXT[i] ?? i}</div>)}
@@ -226,7 +289,7 @@ function OrderDetail({ id, state, onChanged }: { id: string; state: AppState; on
       )}
       <ErrorBox error={error} />
       {order.invoice && <div className="alert ok">Billed as {order.invoice.number} · {rs(order.invoice.total)}</div>}
-      {order.review_note && <div className="alert warn">Rejected: {order.review_note}</div>}
+      {order.review_note && <div className="alert warn">{order.review_note.startsWith('Cancelled by the shop') ? order.review_note : `Rejected: ${order.review_note}`}</div>}
       {editable && (
         <div className="approve-bar">
           <span>Total <b>{rs(total.toFixed(2))}</b></span>

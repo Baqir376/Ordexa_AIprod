@@ -56,6 +56,32 @@ class AliasIn(BaseModel):
     reason: str | None = Field(default=None, max_length=300)
 
 
+SHOP_STEPS = {
+    "customer_answer": "answered",
+    "shop_changed_order": "changed",
+    "cancelled_by_shop": "cancelled",
+    "shop_message_for_staff": "message",
+    "shop_thanks": "thanks",
+}
+
+
+def shop_updates(r: AiOrderRequest) -> list[dict]:
+    """What the shop said or changed in the chat after sending the order (newest last), for the order desk."""
+    out = []
+    for t in r.trace or []:
+        kind = SHOP_STEPS.get(t.get("step"))
+        if kind:
+            out.append(
+                {
+                    "kind": kind,
+                    "at": t.get("at"),
+                    "message": t.get("message") or t.get("answer"),
+                    "changes": t.get("changes") or [],
+                }
+            )
+    return out
+
+
 def out(session: Session, r: AiOrderRequest, full: bool = True) -> dict:
     c = session.get(Customer, r.customer_id) if r.customer_id else None
     inv = session.get(Invoice, r.invoice_id) if r.invoice_id else None
@@ -76,6 +102,7 @@ def out(session: Session, r: AiOrderRequest, full: bool = True) -> dict:
         "warnings": r.warnings or [],
         "invoice": {"id": str(inv.id), "number": inv.number, "total": str(inv.total)} if inv else None,
         "review_note": r.review_note,
+        "shop_updates": shop_updates(r),
     }
     if full:
         d.update(

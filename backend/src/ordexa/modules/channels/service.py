@@ -397,6 +397,8 @@ def handle_inbound(
             # An answer, a change ("balkay 20 box"), an extra item ("... bhi") or a cancel for the unfinished order.
             inbound.ai_order_id = open_req.id
             reply(answer)
+        elif conversation.is_thanks(t):
+            reply(f"Shukriya! {name} se order karne ka shukriya.")
         else:
             req, created = ai.submit(
                 session,

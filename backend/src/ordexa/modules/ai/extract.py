@@ -586,3 +586,29 @@ def sounds_alike(urdu_phrase: str, latin_name: str) -> bool:
     from difflib import SequenceMatcher
 
     return SequenceMatcher(None, a, b).ratio() >= 0.6
+
+
+def structured_call(system: str, user: str, schema: dict, name: str) -> dict:
+    """Strict-JSON call on whichever AI reads orders (Claude or Groq). Raises when no AI is set up or it fails;
+    callers fall back to deterministic rules."""
+    reader = ai_reader()
+    if reader == "groq":
+        from ordexa.modules.ai import groq
+
+        return groq.chat_json(system, user, schema, name)
+    if reader == "anthropic":
+        import anthropic
+
+        response = anthropic.Anthropic(max_retries=2, timeout=60).beta.messages.create(
+            model=get_settings().ai_model,
+            max_tokens=2000,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            output_config={"effort": "low", "format": {"type": "json_schema", "schema": schema}},
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+        )
+        if response.stop_reason in ("refusal", "max_tokens"):
+            raise RuntimeError(f"model stopped: {response.stop_reason}")
+        return json.loads(next((b.text for b in response.content if b.type == "text"), ""))
+    raise RuntimeError("no AI configured")
