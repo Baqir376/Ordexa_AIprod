@@ -129,36 +129,50 @@ class GroqExtractor:
         )
 
 
+AUDIO_EXT = {
+    "audio/ogg": "ogg", "audio/opus": "ogg", "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/aac": "m4a", "audio/amr": "amr",
+    "audio/wav": "wav", "audio/x-wav": "wav", "audio/webm": "webm", "audio/flac": "flac",
+}  # fmt: skip
+
+
 def transcribe(data: bytes, media_type: str) -> str:
-    """Speech-to-text with Whisper. Language is auto-detected (shops mix Urdu and English); the prompt biases it
-    towards medicine names and Roman Urdu units."""
+    """Speech-to-text with Whisper (language auto-detected, generic pharmacy prompt). Voice orders use
+    ``voice.hear()``, which adds audio clean-up, a catalogue prompt and a second hearing."""
+    return transcribe_detailed(data, media_type, prompt=STT_PROMPT)["text"]
+
+
+def transcribe_detailed(
+    data: bytes, media_type: str, *, prompt: str, language: str | None = None, model: str | None = None
+) -> dict:
+    """Whisper with segment details: {"text", "language", "confidence" (0..1), "no_speech" (0..1)}.
+    ``language`` (ISO code, e.g. "ur") forces the language instead of auto-detection."""
+    import math
+
     s = get_settings()
     if len(data) > 25 * 1024 * 1024:
         raise RuntimeError("voice note is larger than the 25 MB free-tier limit")
-    ext = {
-        "audio/ogg": "ogg",
-        "audio/opus": "ogg",
-        "audio/mpeg": "mp3",
-        "audio/mp4": "m4a",
-        "audio/aac": "m4a",
-        "audio/amr": "amr",
-        "audio/wav": "wav",
-        "audio/x-wav": "wav",
-        "audio/webm": "webm",
-    }.get(media_type, "ogg")
+    ext = AUDIO_EXT.get(media_type, "ogg")
     boundary = uuid.uuid4().hex
-    parts = []
-    for name, value in (("model", s.groq_stt_model), ("response_format", "json"), ("temperature", "0"), ("prompt", STT_PROMPT)):
-        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
-    parts.append(
-        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="voice.{ext}"\r\n'
-        f"Content-Type: {media_type}\r\n\r\n".encode()
-        + data
-        + b"\r\n"
-    )
-    parts.append(f"--{boundary}--\r\n".encode())
+    fields = {"model": model or s.groq_stt_model, "response_format": "verbose_json", "temperature": "0", "prompt": prompt}
+    if language:
+        fields["language"] = language
+    crlf = chr(13) + chr(10)  # multipart line break
+    disp = "Content-Disposition: form-data; name="
+    parts = [f'--{boundary}{crlf}{disp}"{k}"{crlf}{crlf}{v}{crlf}'.encode() for k, v in fields.items()]
+    head = f'--{boundary}{crlf}Content-Disposition: form-data; name="file"; filename="voice.{ext}"{crlf}'
+    parts.append(f"{head}Content-Type: {media_type}{crlf}{crlf}".encode() + data + crlf.encode())
+    parts.append(f"--{boundary}--{crlf}".encode())
     res = _post("/audio/transcriptions", b"".join(parts), f"multipart/form-data; boundary={boundary}", timeout=120)
-    return (res.get("text") or "").strip()
+    segs = res.get("segments") or []
+    # Average per-token probability over the note (Whisper's avg_logprob, weighted by segment length).
+    total = sum(max(1, len(seg.get("text", ""))) for seg in segs)
+    logp = sum(seg.get("avg_logprob", 0.0) * max(1, len(seg.get("text", ""))) for seg in segs) / total if segs else -1.0
+    return {
+        "text": (res.get("text") or "").strip(),
+        "language": (res.get("language") or "").lower() or None,
+        "confidence": round(math.exp(min(0.0, logp)), 3),
+        "no_speech": round(max([seg.get("no_speech_prob", 0.0) for seg in segs] or [0.0]), 3),
+    }
 
 
 def chat_json(system: str, user: str, schema: dict, name: str) -> dict:

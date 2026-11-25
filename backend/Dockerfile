@@ -4,6 +4,8 @@ WORKDIR /app
 COPY pyproject.toml alembic.ini ./
 COPY src ./src
 COPY migrations ./migrations
+# ffmpeg cleans WhatsApp voice notes (noise reduction, level) before speech recognition
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir . && useradd --create-home ordexa
 USER ordexa
 EXPOSE 8000

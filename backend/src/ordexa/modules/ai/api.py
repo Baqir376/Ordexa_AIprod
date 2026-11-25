@@ -44,6 +44,10 @@ class ApproveIn(BaseModel):
     new_bill: bool = False  # the shop asked to add to today's bill, but staff want a separate bill
 
 
+class TranscriptIn(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+
+
 class RejectIn(BaseModel):
     reason: str = Field(min_length=3, max_length=300)
 
@@ -125,6 +129,7 @@ def out(session: Session, r: AiOrderRequest, full: bool = True) -> dict:
         "kind": r.kind,
         "transcript": session.get(AiAttachment, r.attachment_id).transcript if r.attachment_id and r.kind == "audio" else None,
         "has_attachment": r.attachment_id is not None,
+        "voice": voice_info(r),
         "received_at": r.received_at.isoformat(),
         "processed_at": r.processed_at.isoformat() if r.processed_at else None,
         "line_count": len(r.lines or []),
@@ -343,6 +348,52 @@ def reprocess(request_id: uuid.UUID, p: Principal = Depends(current_principal), 
     req = service.reprocess(session, p, request_id)
     session.commit()
     return out(session, req)
+
+
+@router.post("/orders/{request_id}/listen-again")
+def listen_again(request_id: uuid.UUID, p: Principal = Depends(current_principal), session: Session = Depends(get_session)):
+    req = service.listen_again(session, p, request_id)
+    session.commit()
+    return out(session, req)
+
+
+@router.post("/orders/{request_id}/transcript")
+def correct_transcript(
+    request_id: uuid.UUID, body: TranscriptIn, p: Principal = Depends(current_principal), session: Session = Depends(get_session)
+):
+    req = service.correct_transcript(session, p, request_id, body.text)
+    session.commit()
+    return out(session, req)
+
+
+def _best_hints(hints: list[dict]) -> list[dict]:
+    """For staff: the closest product per heard word, only when it is a confident match."""
+    best: dict[str, dict] = {}
+    for h in hints:
+        if h.get("score", 0) >= 0.78 and (h["heard"] not in best or h["score"] > best[h["heard"]]["score"]):
+            best[h["heard"]] = h
+    return [{"heard": h["heard"], "product": h["products"][0]} for h in sorted(best.values(), key=lambda h: -h["score"])][:6]
+
+
+def voice_info(r: AiOrderRequest) -> dict | None:
+    """How the voice note was heard, for the desk: transcript, the other hearing, clarity, sound-alike products."""
+    if r.kind != "audio":
+        return None
+    t = next((t for t in reversed(r.trace or []) if t.get("step") == "speech_to_text"), None)
+    edited = any(x.get("step") == "transcript_edited" for x in (r.trace or []))
+    if t is None:
+        return {"clarity": "none", "edited": edited}
+    return {
+        "text": t.get("text"),
+        "alt": t.get("alt"),
+        "language": t.get("language"),
+        "confidence": t.get("confidence"),
+        "clarity": "clear" if edited else t.get("clarity", "fair"),
+        "cleaned": t.get("cleaned", False),
+        "hints": _best_hints(t.get("hints") or []),
+        "error": t.get("error"),
+        "edited": edited,
+    }
 
 
 @router.get("/aliases")

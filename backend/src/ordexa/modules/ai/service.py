@@ -19,7 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ordexa.config import get_settings
-from ordexa.modules.ai import groq, guardrails
+from ordexa.modules.ai import groq, guardrails, phonetic
 from ordexa.modules.ai.extract import (
     ExtractedLine,
     Extraction,
@@ -199,18 +199,22 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
     """Resolve and check every line; set status, warnings, questions. ``keep`` holds operator-resolved lines
     (by line_no) that must not be re-resolved."""
     keep = keep or {}
+    voice = req.kind == "audio"
     wh = _main_warehouse(session, req.tenant_id)
     products = list(session.scalars(select(Product).where(Product.tenant_id == req.tenant_id)))
     by_id = {p.id: p for p in products}
+    active_names = [p.name for p in products if p.is_active] if voice else []
     trace: list[dict] = []
     lines: list[dict] = []
     for i, ex in enumerate(extraction.lines, start=1):
         phrase = normalise_phrase(ex.phrase)
         searches = [phrase]
         read_as = None
-        if has_urdu_script(ex.phrase):
-            # Voice notes often come back in Urdu letters; the catalogue is in English letters.
-            if ex.search_name and not has_urdu_script(ex.search_name) and sounds_alike(ex.phrase, ex.search_name):
+        if has_urdu_script(ex.phrase) or (voice and ex.search_name):
+            # Voice notes often come back in Urdu letters or misspelt; the catalogue is in English letters. The
+            # reader's spelling is used only when what was heard sounds like it.
+            alike = sounds_alike(ex.phrase, ex.search_name or "") or (voice and phonetic.alike(ex.phrase, ex.search_name or ""))
+            if ex.search_name and not has_urdu_script(ex.search_name) and alike:
                 read_as = normalise_phrase(ex.search_name)
             elif ex.search_name:
                 trace.append({"step": "search_name_rejected", "line": i, "search_name": ex.search_name[:60]})
@@ -267,12 +271,27 @@ def evaluate(session: Session, req: AiOrderRequest, extraction: Extraction, keep
                     }
                 )
             else:
+                # Voice notes: products whose names sound like what was heard are candidates too (in any script),
+                # so a misheard name is still found, and several look-alikes are asked about instead of guessed.
+                sound = phonetic.candidates([ex.phrase], active_names, threshold=0.74, limit=5) if voice else []
+                phon = {n: c["score"] * 0.9 for c in sound for n in c["products"]}
                 scored = sorted(
-                    ((max(score_product(s, p) for s in searches), p) for p in products if p.is_active),
+                    (
+                        (max([score_product(s, p) for s in searches] + [phon.get(p.name, 0.0)]), p)
+                        for p in products
+                        if p.is_active
+                    ),
                     key=lambda x: x[0],
                     reverse=True,
                 )
                 cands = [(s, p) for s, p in scored if s >= CANDIDATE_MIN][:5]
+                close = {c["brand"] for c in sound if c["score"] >= sound[0]["score"] - 0.1} if sound else set()
+                if len(close) > 1 and sound[0]["score"] < 0.95:
+                    # Several products sound like the heard word: offer them all; a person (or the shop) picks.
+                    named = [p for p in products if p.is_active and phonetic.brand_of(p.name) in close]
+                    cands = (cands + [(phon.get(p.name, 0.0), p) for p in named if all(p is not q for _, q in cands)])[:6]
+                    trace.append({"step": "voice_lookalikes", "line": i, "heard": ex.phrase[:60], "brands": sorted(close)})
+                    cands = sorted(((min(sc, 0.74), p) for sc, p in cands), key=lambda x: -x[0])  # a person picks
                 line["candidates"] = [
                     {"product_id": str(p.id), "name": p.name, "code": p.code, "generic": p.generic_name, "score": s}
                     for s, p in cands
@@ -449,32 +468,46 @@ def process_request(session: Session, request_id: uuid.UUID, *, defer_on_rate_li
     voice_trace = None
     image = None
     text = req.raw_text
+    rule_text = None
     if req.attachment_id:
         att = session.get(AiAttachment, req.attachment_id)
         if req.kind == "image":
             image = (att.data, att.media_type)
             text = "" if req.raw_text.startswith("[") else req.raw_text
         elif req.kind == "audio":
-            if att.transcript is None and groq.configured():
-                try:
-                    att.transcript = groq.transcribe(att.data, att.media_type)
-                    voice_trace = {"step": "speech_to_text", "provider": "groq", "chars": len(att.transcript)}
-                except Exception as exc:  # noqa: BLE001 - staff can still listen to the voice note
-                    voice_trace = {"step": "speech_to_text", "provider": "groq", "error": str(exc)[:300]}
-            text = att.transcript or ""  # transcript read like a text order; without one, staff listen
+            hearing = _hearing(session, req, att, defer_on_rate_limit=defer_on_rate_limit)
+            if hearing is not None:
+                voice_trace = hearing.trace()
+                if hearing.error is None:
+                    text, rule_text = hearing.reader_text(), hearing.text
+            if not rule_text:
+                text = att.transcript or ""  # without a transcript staff listen to the note
     source = text
+    if rule_text is not None:
+        source = hearing.source_text()  # guardrails check what the shop said, never the catalogue hints
     clean = guardrails.sanitize_input(text)
     result = (
-        extract_order(clean, image, defer_on_rate_limit=defer_on_rate_limit)
+        extract_order(
+            clean,
+            image,
+            defer_on_rate_limit=defer_on_rate_limit,
+            rule_text=guardrails.sanitize_input(rule_text) if rule_text else None,
+        )
         if (clean or image)
         else ExtractResult(Extraction(), "none", [])
     )
     _apply_guardrails(result.extraction, source, from_photo=image is not None)
+    if voice_trace and voice_trace.get("clarity") == "unclear" and result.extraction.lines:
+        result.extraction.guard_warnings.append(
+            {"code": "voice_unclear", "message": "The voice note was hard to hear: play it and check the items before approving."}
+        )
     _classify(result.extraction, source, result.extractor)
     _merge_duplicates(result.extraction)
     req.extractor = result.extractor
     req.extraction = result.extraction.model_dump()
-    carried = [t for t in (req.trace or []) if t.get("step") in ("after_billed_order", "add_to_bill")]  # set on arrival
+    carried = [
+        t for t in (req.trace or []) if t.get("step") in ("after_billed_order", "add_to_bill", "transcript_edited")
+    ]  # set on arrival
     req.trace = carried + ([voice_trace] if voice_trace else []) + result.trace
     req.error = None
     evaluate(session, req, result.extraction)
@@ -489,6 +522,45 @@ def process_request(session: Session, request_id: uuid.UUID, *, defer_on_rate_li
     if req.source == "whatsapp":
         respond(session, req, result.extraction)
     return req
+
+
+def _hearing(session: Session, req: AiOrderRequest, att: AiAttachment, *, defer_on_rate_limit: bool):
+    """The voice note as text. Heard once (two passes, see voice.py) and kept: re-reading an order reuses the stored
+    hearing, or the staff's corrected transcript, instead of calling speech recognition again."""
+    from ordexa.modules.ai import voice
+
+    prev = next((t for t in reversed(req.trace or []) if t.get("step") == "speech_to_text" and t.get("text")), None)
+    if att.transcript is not None:
+        names = voice.product_names(session, req.tenant_id)
+        if prev and prev.get("text") == att.transcript:
+            h = voice.Hearing(
+                text=prev["text"],
+                alt=prev.get("alt"),
+                language=prev.get("language"),
+                confidence=prev.get("confidence", 0.0),
+                passes=prev.get("passes", []),
+                cleaned=prev.get("cleaned", False),
+            )
+        else:  # typed by staff ("Fix what was said") or heard by an older version
+            edited = bool(prev) or any(t.get("step") == "transcript_edited" for t in (req.trace or []))
+            h = voice.Hearing(
+                text=att.transcript, confidence=1.0 if edited else 0.0, passes=[{"mode": "staff" if edited else "stored"}]
+            )
+        h.hints = phonetic.candidates([t for t in (h.text, h.alt) if t], names)
+        return h
+    if not groq.configured():
+        return None
+    try:
+        h = voice.hear(session, req.tenant_id, att.data, att.media_type)
+        att.transcript = h.text
+        return h
+    except groq.RateLimited:
+        if defer_on_rate_limit:
+            raise  # the AI worker tries again shortly
+        return voice.Hearing(text="", error="speech recognition is busy (free-tier limit); press Listen again")
+    except Exception as exc:  # noqa: BLE001 - staff can still listen to the voice note
+        log.warning("speech recognition failed: %s", exc)
+        return voice.Hearing(text="", error=str(exc)[:300])
 
 
 GREETING_WORDS = r"shukriya|shukria|thanks?|thank you|jazak ?allah|salam|assalam ?o ?alaikum|aoa|regards|sir|bhai|ji|please|order"
@@ -1470,6 +1542,40 @@ def mark_handled(session: Session, actor: Principal, request_id: uuid.UUID) -> A
     record(session, tenant_id=req.tenant_id, actor_user_id=actor.user_id, action="ai_order.message_handled",
            entity_type="ai_order", entity_id=req.id, data={"number": req.number})  # fmt: skip
     return req
+
+
+def listen_again(session: Session, actor: Principal, request_id: uuid.UUID) -> AiOrderRequest:
+    """Run speech recognition on the voice note again (e.g. after it failed or the free-tier limit was hit)."""
+    actor.require("sales_order.create")
+    req = _get(session, actor, request_id)
+    if req.kind != "audio" or not req.attachment_id:
+        raise OrdexaError(ErrorCode.VALIDATION_ERROR, "this order is not a voice note")
+    if req.status in ("approved", "rejected"):
+        raise OrdexaError(ErrorCode.CONFLICT, f"order is already {req.status}")
+    session.get(AiAttachment, req.attachment_id).transcript = None
+    req.trace = [t for t in (req.trace or []) if t.get("step") != "speech_to_text"]
+    req.status = "received"
+    return process_request(session, req.id)
+
+
+def correct_transcript(session: Session, actor: Principal, request_id: uuid.UUID, text: str) -> AiOrderRequest:
+    """Staff listened and typed what the shop actually said; the order is read again from that."""
+    actor.require("sales_order.create")
+    req = _get(session, actor, request_id)
+    if req.kind != "audio" or not req.attachment_id:
+        raise OrdexaError(ErrorCode.VALIDATION_ERROR, "this order is not a voice note")
+    if req.status in ("approved", "rejected"):
+        raise OrdexaError(ErrorCode.CONFLICT, f"order is already {req.status}")
+    text = text.strip()
+    if not text:
+        raise OrdexaError(ErrorCode.VALIDATION_ERROR, "type what the shop said")
+    att = session.get(AiAttachment, req.attachment_id)
+    record(session, tenant_id=req.tenant_id, action="ai_order.transcript_corrected", entity_type="ai_order", entity_id=req.id,
+           data={"before": (att.transcript or "")[:500], "after": text[:500]})  # fmt: skip
+    att.transcript = text
+    req.trace = (req.trace or []) + [{"step": "transcript_edited", "by": actor.username}]
+    req.status = "received"
+    return process_request(session, req.id)
 
 
 def reprocess(session: Session, actor: Principal, request_id: uuid.UUID) -> AiOrderRequest:

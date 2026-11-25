@@ -40,11 +40,20 @@ try {
     await page.waitForTimeout(1800)
     await shot(name)
     if (label === 'WhatsApp orders') {
-      const first = page.locator('.order-card').first()
+      // TOUR_ORDER=AO-000117 opens that order (e.g. a voice note) instead of the first one
+      const first = process.env.TOUR_ORDER
+        ? page.locator('.order-card', { hasText: process.env.TOUR_ORDER }).first()
+        : page.locator('.order-card').first()
       if (await first.isVisible()) {
         await first.click()
         await page.waitForTimeout(1500)
         await shot('04-order-detail')
+        const voiceCard = page.locator('.voice-card')
+        if (await voiceCard.isVisible()) {
+          await voiceCard.evaluate((el) => { el.scrollIntoView({ block: 'center' }) })
+          await page.waitForTimeout(800)
+          await shot('04v-voice-note')
+        }
         const chatTab = page.getByRole('button', { name: /Chat with shop/ })
         if (await chatTab.isVisible()) {
           await chatTab.click()

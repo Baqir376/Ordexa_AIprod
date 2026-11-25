@@ -43,6 +43,7 @@ interface Order {
   kind?: 'text' | 'image' | 'audio'
   has_attachment?: boolean
   transcript?: string | null
+  voice?: VoiceInfo | null
   received_at: string
   line_count: number
   warnings: { code: string; message: string }[]
@@ -55,6 +56,96 @@ interface Order {
   questions?: string[]
   trace?: Record<string, unknown>[]
   extractor?: string
+}
+
+interface VoiceInfo {
+  text?: string | null
+  alt?: string | null
+  language?: string | null
+  confidence?: number | null
+  clarity: 'clear' | 'fair' | 'unclear' | 'none'
+  cleaned?: boolean
+  hints?: { heard: string; product: string }[]
+  error?: string | null
+  edited?: boolean
+}
+
+const CLARITY: Record<VoiceInfo['clarity'], [string, string]> = {
+  clear: ['Clear', 'ok'],
+  fair: ['Some noise', 'fair'],
+  unclear: ['Hard to hear', 'bad'],
+  none: ['Not heard yet', 'none'],
+}
+const LANG: Record<string, string> = { ur: 'Urdu', en: 'English', hi: 'Urdu (Hindi letters)', other: 'Mixed' }
+
+/** How the voice note was heard: play it, read it, fix it, or hear it again. */
+function VoiceCard({ order, busy, onFix, onListenAgain }: { order: Order; busy: boolean; onFix: (text: string) => void; onListenAgain: () => void }) {
+  const v: VoiceInfo = order.voice ?? { clarity: order.transcript ? 'fair' : 'none' }
+  const text = v.text ?? order.transcript ?? ''
+  const [editing, setEditing] = useState<string | null>(null)
+  const [showAlt, setShowAlt] = useState(false)
+  const [label, tone] = v.edited ? ['Typed by staff', 'ok'] : CLARITY[v.clarity] ?? CLARITY.fair
+  const pct = v.confidence != null ? Math.round(v.confidence * 100) : null
+  const reading = order.status === 'received' || order.status === 'processing'
+  return (
+    <div className={`voice-card clarity-${tone}`}>
+      <div className="voice-head">
+        <span className="voice-ico"><Icon name="mic" size={16} /></span>
+        <b>Voice note</b>
+        <span className={`voice-clarity c-${tone}`} title={pct != null ? `Recognition confidence ${pct}%` : undefined}>
+          <i className="bars"><i /><i /><i /></i>{label}
+        </span>
+        {v.language && !v.edited && <span className="voice-chip">{LANG[v.language] ?? v.language}</span>}
+        {v.cleaned && !v.edited && <span className="voice-chip"><Icon name="wave" size={12} /> Noise removed</span>}
+      </div>
+      {order.has_attachment && <Attachment orderId={order.id} kind="audio" />}
+      {reading && !text ? (
+        <div className="voice-listening"><span className="eq"><i /><i /><i /><i /></span> Listening to the voice note…</div>
+      ) : editing !== null ? (
+        <div className="voice-edit">
+          <textarea dir="auto" value={editing} autoFocus rows={3} onChange={(e) => setEditing(e.target.value)}
+            placeholder="Type what the shop said, e.g. 10 dabbe Augmentin aur 5 Risek" />
+          <div className="voice-actions">
+            <button className="btn primary small" disabled={busy || !editing.trim()} onClick={() => { onFix(editing); setEditing(null) }}>Save and read again</button>
+            <button className="btn small" onClick={() => setEditing(null)}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <>
+          {text ? (
+            <div className="voice-heard">
+              <span className="voice-label">What we heard</span>
+              <p dir="auto">{text}</p>
+            </div>
+          ) : (
+            <div className="voice-heard empty">{v.error ? `Could not hear it: ${v.error}` : 'Not heard yet. Play it, or press Listen again.'}</div>
+          )}
+          {v.alt && (
+            <button className="voice-alt-toggle" onClick={() => setShowAlt(!showAlt)}>
+              <Icon name="chevron" size={12} /> {showAlt ? 'Hide' : 'Show'} the other hearing
+            </button>
+          )}
+          {v.alt && showAlt && <p className="voice-alt" dir="auto">{v.alt}</p>}
+          {(v.hints?.length ?? 0) > 0 && (
+            <div className="voice-hints">
+              <span className="voice-label">Matched to your products</span>
+              <div className="hint-chips">
+                {v.hints!.slice(0, 6).map((h, i) => (
+                  <span key={i} className="hint-chip"><q dir="auto">{h.heard}</q><Icon name="chevron" size={11} /><b>{h.product}</b></span>
+                ))}
+              </div>
+            </div>
+          )}
+          {order.status !== 'approved' && order.status !== 'rejected' && (
+            <div className="voice-actions">
+              <button className="btn small" disabled={busy} onClick={() => setEditing(text)}><Icon name="edit" size={13} /> Fix what was said</button>
+              <button className="btn small" disabled={busy} onClick={onListenAgain}><Icon name="refresh" size={13} /> Listen again</button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -543,8 +634,11 @@ function OrderDetail({ id, state, onChanged, onDeleted }: { id: string; state: A
             <div className="od-sec-title"><Icon name="message" size={15} /> What the shop sent</div>
             <div className="od-quote">
               {order.raw_text.startsWith('[') && order.kind !== 'text' ? null : order.raw_text}
-              {order.has_attachment && <Attachment orderId={order.id} kind={order.kind ?? 'text'} />}
-              {order.transcript && <div className="transcript"><span className="muted small">Heard in the voice note:</span> {order.transcript}</div>}
+              {order.kind === 'audio' ? (
+                <VoiceCard order={order} busy={busy} onFix={(t) => void act('/transcript', { text: t })} onListenAgain={() => void act('/listen-again')} />
+              ) : (
+                order.has_attachment && <Attachment orderId={order.id} kind={order.kind ?? 'text'} />
+              )}
             </div>
             {(order.shop_updates?.length ?? 0) > 0 && (
               <ul className="od-updates">

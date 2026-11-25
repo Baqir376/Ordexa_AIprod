@@ -437,7 +437,8 @@ EXTRACTION_SCHEMA = {
                     "phrase": {"type": "string", "description": "product as written, without quantity/unit words"},
                     "search_name": {
                         "type": ["string", "null"],
-                        "description": "if phrase is in Urdu script: the same name spelled in English letters; else null",
+                        "description": "Urdu-script phrase: the name in English letters. Voice note: the listed catalogue "
+                        "spelling of a misheard name. Else null",
                     },
                     "quantity": {"type": ["number", "null"]},
                     "unit": {
@@ -492,6 +493,15 @@ message_type - what the shop mainly wants:
 - question: any other question for the company.
 - greeting_thanks: hello / thanks / ok with nothing else.
 - other: anything else (e.g. "?", random text).
+
+Voice notes start with "[Voice note: ...]". Speech recognition wrote what it heard ("Heard:", sometimes also
+"Also heard as:") and lists catalogue products whose names sound like heard words. Recognition makes mistakes:
+medicine names misspelled, written in Urdu or Hindi letters, numbers as words in any language, or a noisy note
+wrongly translated. Read the order from the hearing that makes sense (never list an item twice because both hearings
+contain it). When a heard name is clearly a mishearing of a listed sound-alike product, keep phrase = the words as
+heard and set search_name = that product's name as listed (heard "Raizet", list says RISEK 20MG CAP -> search_name
+"risek 20mg cap"). Only use a listed product when the heard word really sounds like it; otherwise search_name null.
+quantity is the number of units ordered, not the strength (Klaricid 500 = 500 mg, not 500 boxes).
 
 Sometimes the order is a photo of a handwritten or printed list (with an optional caption). Read every item and
 quantity you can see in the photo. If a word is unreadable, still add the line with your best reading of the letters
@@ -573,7 +583,9 @@ def claude_enabled() -> bool:
     return ai_reader() == "anthropic"
 
 
-def extract_order(text: str, image: tuple[bytes, str] | None = None, *, defer_on_rate_limit: bool = False) -> ExtractResult:
+def extract_order(
+    text: str, image: tuple[bytes, str] | None = None, *, defer_on_rate_limit: bool = False, rule_text: str | None = None
+) -> ExtractResult:
     """Claude when configured; the rule parser otherwise or when Claude is unavailable (the ERP never blocks on AI).
     ``image`` is a photo of an order list; only Claude can read it (the rule parser reads the caption only)."""
     s = get_settings()
@@ -598,7 +610,7 @@ def extract_order(text: str, image: tuple[bytes, str] | None = None, *, defer_on
             if defer_on_rate_limit and isinstance(exc, RateLimited):
                 raise  # the AI worker retries the job shortly; better than the rule parser
             log.warning("%s extraction failed, using rules: %s", reader, exc)
-            fallback = RuleExtractor().extract(text)
+            fallback = RuleExtractor().extract(rule_text or text)
             fallback.trace.insert(
                 0,
                 {
@@ -608,7 +620,7 @@ def extract_order(text: str, image: tuple[bytes, str] | None = None, *, defer_on
                 },
             )
             return fallback
-    return RuleExtractor().extract(text)
+    return RuleExtractor().extract(rule_text or text)
 
 
 # ------------------------------------------------------------------ Urdu script -> English letters (for matching only)
